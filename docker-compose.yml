@@ -1,0 +1,28 @@
+services:
+  moread:
+    build: .
+    container_name: moread
+    ports:
+      - "8686:8686"
+    volumes:
+      # 数据（数据库/小说/媒体/备份）持久化到本机
+      - ./backend/data:/app/backend/data
+    environment:
+      - MOREAD_DATA_DIR=/app/backend/data
+      - MOREAD_QUOTA_GB=20
+    restart: unless-stopped
+
+  # 可选：网页完整归档（ArchiveBox）。安装后在工具箱中会显示为可用。
+  # 需要时执行: docker compose --profile archive up -d
+  archivebox:
+    image: archivebox/archivebox:latest
+    profiles: ["archive"]
+    container_name: moread-archivebox
+    command: server --quick 0.0.0.0:8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data/archive/archivebox:/data
+    environment:
+      - MEDIA_MAX_SIZE=750m
+    restart: unless-stopped
