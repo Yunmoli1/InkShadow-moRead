@@ -56,8 +56,8 @@ pip install yt-dlp gallery-dl you-get lightnovel-crawler
 
 | 地址 | 说明 |
 | --- | --- |
-| http://127.0.0.1:8686 | 应用（前端 + API 一体） |
-| http://127.0.0.1:8686/docs | OpenAPI 交互文档（全部 API 可在页面直接调试） |
+| `http://127.0.0.1:8686` | 应用（前端 + API 一体） |
+| `http://127.0.0.1:8686/docs` | OpenAPI 交互文档（全部 API 可在页面直接调试） |
 
 ## 📦 外部工具安装指引
 
@@ -84,14 +84,15 @@ pip install yt-dlp gallery-dl you-get lightnovel-crawler
 │   │   ├── main.py             # 入口：API + 前端静态托管 + SPA 回退
 │   │   ├── models.py           # Novel/Chapter/Note/Media/Task/Session/Setting
 │   │   ├── routers/            # tools / tasks(SSE) / novels / media / settings
+│   │   ├── tests/              # pytest API 测试
 │   │   └── services/
-│   │       ├── tool_registry.py    # 工具注册表：检测/版本/argv/进度解析/搜索
-│   │       ├── task_manager.py     # 子进程生命周期 + SSE 事件总线 + 断点续传
-│   │       ├── novel_parser.py     # TXT 章节切分 / EPUB / lncrawl 产物导入
-│   │       ├── web_saver.py        # 内置单页快照（兜底）
-│   │       ├── ai_service.py       # Ollama 默认 / OpenAI 兼容
-│   │       └── storage.py          # 配额与清理
-│   └── data/                   # 运行数据（db/小说/媒体/备份，已 gitignore）
+│   │           ├── tool_registry.py    # 工具注册表：检测/版本/argv/进度解析/搜索
+│   │           ├── task_manager.py     # 子进程生命周期 + SSE 事件总线 + 断点续传
+│   │           ├── novel_parser.py     # TXT 章节切分 / EPUB / 工具产物导入
+│   │           ├── web_saver.py        # 内置单页快照（兜底）
+│   │           ├── ai_service.py       # Ollama 默认 / OpenAI 兼容
+│   │           └── storage.py          # 配额与清理
+│   └── data/                   # 运行数据（数据库/小说/媒体/备份，已 gitignore）
 ├── frontend/           # React 18 + Vite + TS + Zustand + Tailwind v4 + shadcn/ui + PWA
 │   └── src/
 │       ├── pages/              # 万能抓取/任务中心/资源库/书架/阅读器/统计/工具箱/设置
@@ -116,23 +117,18 @@ pip install yt-dlp gallery-dl you-get lightnovel-crawler
 
 ## 🔒 隐私与安全
 
-- 所有数据（数据库、下载内容、笔记、备份）仅存于本机 `backend/data/`。
+- 所有数据（数据库、下载内容、笔记、备份）仅存于本机 `backend/data/`（该目录不入版本库）。
 - AI 摘要默认连接本地 Ollama（`http://localhost:11434`，模型 `llama3`）；
   可在设置中切换为 OpenAI 兼容外部 API（Key 仅存本地数据库）。
 - 备份文件在前端使用 WebCrypto AES-GCM + PBKDF2(150k) 加密，密码不落盘。
+- 仓库中不含任何个人数据、下载记录与运行日志。
 
-## ✅ 验收对照
+## 🧪 质量保障
 
-| # | 验收项 | 状态 |
-| --- | --- | --- |
-| 1 | 后端 API 通过 `/docs` | ✔ OpenAPI 33 条路径 |
-| 2 | 万能抓取→任务中心→资源库→预览 | ✔ 端到端走通 |
-| 3 | yt-dlp / gallery-dl 实际下载 | ✔ 视频 991KB / 图片 178KB 实测 |
-| 4 | lncrawl 下载 50+ 章小说 | ✔ 148 章实测 |
-| 5 | 暂停/恢复（断点续传） | ✔ 实测暂停于 14% 后恢复续传 |
-| 6 | SSE 实时进度 + 断线重连 | ✔ 指数退避自动重连 |
-| 7 | 1000+ 章节虚拟滚动 | ✔ react-window（含 1200 章测试书） |
-| 8 | 大文件 Web Worker 解析 | ✔ TXT 导入 Worker 预览 |
-| 9-11 | 界面 / 异常处理 / 多端 | ✔ 骨架屏、友好错误、响应式 |
-| 12 | PWA 安装与离线 | ✔ vite-plugin-pwa（CacheFirst 媒体缓存） |
-| 13 | `pnpm run build` 与 `docker compose up` | ✔ 均通过 |
+- pytest 覆盖全部 API（导入/抓取/任务生命周期/SSE/备份/异常路径）。
+- 真实工具调度、断点续传、虚拟滚动、Web Worker 大文件解析均通过端到端验证。
+- `pnpm run build` 与 `docker compose up` 可一键构建部署。
+
+## 📄 许可
+
+仅供个人学习研究使用。
