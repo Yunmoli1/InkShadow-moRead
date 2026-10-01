@@ -32,4 +32,5 @@ export const MEDIA_TYPE_LABEL: Record<string, string> = {
   audio: '音频',
   page: '网页',
   doc: '文档',
+  file: '文件',
 }

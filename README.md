@@ -24,6 +24,45 @@
 
 ## 🚀 快速开始
 
+### 方式零：单文件可执行程序（零依赖）
+
+```bash
+# 构建（需 Python 3.11+ 与 Node 构建环境各一，仅构建者需要）
+cd frontend && pnpm install && pnpm run build && cd ..
+pip install pyinstaller
+pyinstaller moread.spec --noconfirm
+cp dist/moread.exe releases/        # Windows；macOS/Linux 在对应平台执行同样命令
+```
+
+双击 `moread.exe` 即可运行：自动打开浏览器访问 <http://127.0.0.1:8686>。
+前后端与页面资源全部内嵌于单一二进制，**运行机器无需安装 Python / Node / Docker**；
+所有用户数据（数据库、下载、备份）写在 exe 同级的 `data/` 目录，随目录整体迁移。
+设置环境变量 `MOREAD_DATA_DIR` 可自定义数据目录，`MOREAD_HOST` / `MOREAD_PORT` 可改监听地址端口，`MOREAD_NO_BROWSER=1` 禁止自动开浏览器。
+
+**预构建产物**（`releases/`）：
+
+| 文件 | 平台 | 基线 |
+| --- | --- | --- |
+| `moread.exe` | Windows x64 | 任意 Win10/11，双击即用 |
+| `moread-linux` | Linux x86_64 | glibc ≥ 2.31（Debian 11+ / Ubuntu 20.04+），`chmod +x moread-linux && ./moread-linux` |
+| `moread.apk` | Android 7.0+（arm64/arm/x86 通用） | WebView 壳客户端，见下 |
+
+Linux 版由 Docker 容器（`python:3.12-bullseye`）内执行同一 `moread.spec` 构建，
+并已在未安装 Python 的纯净 Debian 容器中完成功能验证。
+
+### Android APK
+
+`android-apk/` 内是手工构建的 WebView 壳客户端（无 Gradle，`bash android-apk/build-apk.sh` 可复现构建）：
+前端全部内嵌进 APK；`/api` 请求经应用内置反向代理转发到 PC 端墨读服务器。
+
+使用方式：
+1. 电脑上运行 `moread.exe`（或 Linux 版），首次启动后按提示修改配置使局域网可访问：
+   设置 `MOREAD_HOST=0.0.0.0` 环境变量重启程序（Windows 侧需在防火墙放行 8686 端口）。
+2. 手机安装 `moread.apk`，启动后按提示填入电脑局域网地址（如 `192.168.1.100:8686`，右下角 ⚙ 可随时修改）。
+3. 书架/阅读/笔记/下载/媒体播放等全部功能均通过电脑端服务执行，手机端完整可用。
+
+> 说明：PyInstaller 不支持交叉编译，macOS 版需在 Mac 上执行同一 spec 构建。
+
 ### 方式一：Docker 一键启动（推荐）
 
 ```bash

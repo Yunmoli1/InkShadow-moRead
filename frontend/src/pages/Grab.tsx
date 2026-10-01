@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Download, Link2, Search, Sparkles } from 'lucide-react'
+import { CheckSquare, Download, Eye, Link2, Search, Sparkles, Square } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,7 +27,21 @@ const TYPES = [
   { value: 'audio', label: '音频' },
   { value: 'page', label: '完整网页' },
   { value: 'novel', label: '小说' },
+  { value: 'file', label: '文件/压缩包' },
 ]
+
+interface PreviewItem { title: string; url: string }
+
+interface PreviewResult {
+  url: string
+  tool: { name: string; display: string; category: string; remark: string }
+  probe: {
+    title?: string
+    count?: number
+    items?: PreviewItem[]
+    note?: string
+  } | null
+}
 
 export default function Grab() {
   const [url, setUrl] = useState('')
@@ -35,6 +49,9 @@ export default function Grab() {
   const [tool, setTool] = useState('auto')
   const [tools, setTools] = useState<ToolInfo[]>([])
   const [submitting, setSubmitting] = useState(false)
+  const [previewing, setPreviewing] = useState(false)
+  const [preview, setPreview] = useState<PreviewResult | null>(null)
+  const [selected, setSelected] = useState<string[]>([])
   const [taskId, setTaskId] = useState<string | null>(null)
   const [progress, setProgress] = useState<TaskSseEvent | null>(null)
   const navigate = useNavigate()
@@ -84,6 +101,73 @@ export default function Grab() {
     }
   }
 
+  const doPreview = async () => {
+    if (!url.trim()) {
+      toast('error', '请输入要预览的 URL')
+      return
+    }
+    setPreviewing(true)
+    setPreview(null)
+    setSelected([])
+    try {
+      const res = await api.post<PreviewResult>('/api/tools/preview', {
+        url: url.trim(),
+        content_type: type,
+        tool: tool === 'auto' ? undefined : tool,
+      })
+      setPreview(res)
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '预览失败')
+    } finally {
+      setPreviewing(false)
+    }
+  }
+
+  const toggleItem = (u: string) => {
+    setSelected((sel) => (sel.includes(u) ? sel.filter((x) => x !== u) : [...sel, u]))
+  }
+
+  const toggleAll = () => {
+    const items = preview?.probe?.items ?? []
+    setSelected((sel) => (sel.length === items.length ? [] : items.map((it) => it.url)))
+  }
+
+  const downloadSelected = async () => {
+    if (!selected.length) {
+      toast('error', '请先在预览列表中勾选资源')
+      return
+    }
+    setSubmitting(true)
+    setProgress(null)
+    try {
+      const created = await api.post<{ task_id: string; tool: string; message: string }>(
+        '/api/tools/items/download',
+        { urls: selected },
+      )
+      setTaskId(created.task_id)
+      setPreview(null)
+      toast('success', created.message)
+      const unsub = subscribeTask(created.task_id, {
+        onProgress: (ev) => setProgress(ev),
+        onEnd: (status) => {
+          setProgress((p) => ({ ...(p ?? { task_id: created.task_id }), status, progress: 100 }))
+          if (status === 'completed') {
+            toast('success', '选择下载完成！已加入资源库')
+            setTimeout(() => navigate('/library'), 1200)
+          } else if (status === 'failed') {
+            toast('error', '下载失败，请查看任务中心了解详情')
+          }
+        },
+        onReconnecting: () => window.dispatchEvent(new Event('moread-sse-down')),
+      })
+      unsubs.current.push(unsub)
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '创建任务失败')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const installed = tools.filter((t) => t.installed)
   const pct = progress?.progress ?? 0
   const status = progress?.status
@@ -121,6 +205,9 @@ export default function Grab() {
                   ))}
                 </SelectContent>
               </Select>
+              <Button size="lg" variant="outline" className="h-12 px-5" onClick={doPreview} disabled={previewing}>
+                <Eye className="size-4" /> {previewing ? '预览中…' : '预览'}
+              </Button>
               <Button size="lg" className="h-12 px-6" onClick={submit} disabled={submitting}>
                 <Download className="size-4" /> 一键抓取
               </Button>
@@ -148,6 +235,60 @@ export default function Grab() {
           </div>
         </CardContent>
       </Card>
+
+      {/* 下载目标预览 */}
+      {preview && (
+        <Card className="rounded-xl shadow-md">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><Eye className="size-4 text-primary" /> 下载目标预览</CardTitle>
+            <CardDescription className="truncate">
+              将调度 <span className="font-medium text-foreground">{preview.tool.display}</span>
+              （{preview.tool.remark || preview.tool.category}）
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {preview.probe?.title && (
+              <div className="text-sm font-medium">{preview.probe.title}</div>
+            )}
+            {typeof preview.probe?.count === 'number' && (
+              <Badge tone="default">预计 {preview.probe.count} 项</Badge>
+            )}
+            {preview.probe?.note && (
+              <div className="text-xs text-muted-foreground">{preview.probe.note}</div>
+            )}
+            {!!preview.probe?.items?.length && (
+              <>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>已选 {selected.length}/{preview.probe.items.length}</span>
+                  <button className="inline-flex items-center gap-1 hover:text-primary" onClick={toggleAll}>
+                    <CheckSquare className="size-3" /> 全选/取消
+                  </button>
+                </div>
+                <ul className="max-h-52 space-y-0.5 overflow-y-auto rounded-lg bg-muted/50 p-2">
+                  {preview.probe.items.map((it) => {
+                    const on = selected.includes(it.url)
+                    return (
+                      <li key={it.url}>
+                        <button
+                          className={cn('flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
+                            on ? 'bg-primary/15' : 'hover:bg-black/5')}
+                          onClick={() => toggleItem(it.url)}
+                        >
+                          {on ? <CheckSquare className="size-3.5 shrink-0 text-primary" /> : <Square className="size-3.5 shrink-0 opacity-40" />}
+                          <span className="truncate">{it.title}</span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+                <Button className="w-full" disabled={!selected.length || submitting} onClick={downloadSelected}>
+                  <Download className="size-4" /> 下载所选 {selected.length ? `(${selected.length})` : ''}
+                </Button>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* 实时进度 */}
       {taskId && (

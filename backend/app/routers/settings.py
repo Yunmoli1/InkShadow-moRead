@@ -21,6 +21,7 @@ DEFAULTS = {
     "ai_model": config.DEFAULT_AI_MODEL,
     "ai_style": "ollama",
     "ai_api_key": "",
+    "proxy_url": config.DEFAULT_PROXY_URL,
     "storage_quota_gb": config.DEFAULT_STORAGE_QUOTA_GB,
     "reader_font_size": 18,
     "reader_line_height": 1.8,

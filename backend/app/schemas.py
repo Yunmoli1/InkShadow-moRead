@@ -174,6 +174,7 @@ class SettingsOut(BaseModel):
     ai_model: str
     ai_style: str = "ollama"
     ai_api_key: str = ""
+    proxy_url: str = ""
     storage_quota_gb: float
     reader_font_size: int = 18
     reader_line_height: float = 1.8
@@ -187,11 +188,22 @@ class SettingsIn(BaseModel):
     ai_model: str | None = None
     ai_style: str | None = None
     ai_api_key: str | None = None
+    proxy_url: str | None = None
     storage_quota_gb: float | None = None
     reader_font_size: int | None = None
     reader_line_height: float | None = None
     reader_paper: str | None = None
     reader_mode: str | None = None
+
+
+class PreviewRequest(BaseModel):
+    url: str
+    content_type: str = "auto"
+    tool: str | None = None
+
+
+class DownloadItemsIn(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=100)
 
 
 class ReadingSessionIn(BaseModel):

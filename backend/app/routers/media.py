@@ -1,8 +1,8 @@
 """Media endpoints: list / detail / file serving (Range) / delete / batch import."""
 
 import mimetypes
-import os
 import re
+import urllib.parse
 import uuid
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -134,11 +134,20 @@ async def media_file(media_id: str, request: Request) -> StreamingResponse:
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
-        "Content-Disposition": f'inline; filename="{os.path.basename(path.name)}"',
+        # RFC 5987: non-ASCII (中文/emoji) filenames must go in filename*,
+        # plain filename* requires latin-1 and crashes the response.
+        "Content-Disposition": _content_disposition(path.name),
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
     return StreamingResponse(file_iter(), status_code=status_code, media_type=mime, headers=headers)
+
+
+def _content_disposition(filename: str) -> str:
+    """Build a header-safe Content-Disposition for any filename."""
+    ascii_name = filename.encode("ascii", "ignore").decode() or "file"
+    quoted = urllib.parse.quote(filename)
+    return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
 
 
 @router.delete("/{media_id}")

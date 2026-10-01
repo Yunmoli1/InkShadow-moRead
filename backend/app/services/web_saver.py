@@ -14,13 +14,16 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .netenv import get_proxy_url, should_proxy
+
 
 async def save_single_page(url: str, out_dir: str) -> AsyncIterator[dict]:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     yield {"progress": 5, "message": "连接目标网页…", "log": f"GET {url}"}
+    proxy = await get_proxy_url()
     async with httpx.AsyncClient(follow_redirects=True, timeout=30, headers={
         "User-Agent": "Mozilla/5.0 (compatible; MoRead/1.0; personal local knowledge base)",
-    }) as client:
+    }, proxy=proxy if should_proxy(url, proxy) else None) as client:
         resp = await client.get(url)
         resp.raise_for_status()
         yield {"progress": 50, "message": "已下载 HTML，正在保存…", "log": f"{resp.status_code} {len(resp.content)} bytes"}

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import httpx
 
+from .netenv import should_proxy
+
 
 class AiError(Exception):
     """User-facing AI error (message is safe to show)."""
@@ -17,6 +19,8 @@ async def summarize(text: str, settings: dict) -> str:
     api_key = settings.get("ai_api_key") or ""
     model = settings.get("ai_model") or "llama3"
     style = settings.get("ai_style") or "ollama"  # ollama | openai
+    proxy = (settings.get("proxy_url") or "").strip()
+    client_kwargs = {"proxy": proxy} if should_proxy(base_url, proxy) else {}
     prompt = (
         "你是一位中文阅读助手。请用简洁的中文为以下小说章节内容生成一段摘要"
         "（150字以内），概括主要情节与人物，不要编造内容。\n\n章节内容：\n"
@@ -25,7 +29,7 @@ async def summarize(text: str, settings: dict) -> str:
     try:
         if style == "openai":
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            async with httpx.AsyncClient(timeout=120, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=120, headers=headers, **client_kwargs) as client:
                 resp = await client.post(
                     f"{base_url}/v1/chat/completions",
                     json={
@@ -38,7 +42,7 @@ async def summarize(text: str, settings: dict) -> str:
                 data = resp.json()
                 return data["choices"][0]["message"]["content"].strip()
         # default: Ollama native API
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, **client_kwargs) as client:
             resp = await client.post(
                 f"{base_url}/api/chat",
                 json={

@@ -150,6 +150,26 @@ async def list_chapters(
         }
 
 
+@router.get("/{novel_id}/images/{name}")
+async def novel_image(novel_id: str, name: str):
+    """Serve an image extracted from an imported EPUB ([img:<name>] markers)."""
+    import re
+
+    from fastapi.responses import FileResponse
+
+    if not re.fullmatch(r"[\w.\-]+", name):
+        raise HTTPException(400, "非法文件名")
+    p = config.COVERS_DIR / novel_id / "images" / name
+    if not p.is_file():
+        raise HTTPException(404, "图片不存在")
+    mime = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+        ".bmp": "image/bmp",
+    }.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=mime)
+
+
 @router.get("/{novel_id}/chapters/{chapter_id}/content", response_model=ChapterContentOut)
 async def chapter_content(novel_id: str, chapter_id: str) -> ChapterContentOut:
     async with SessionLocal() as db:

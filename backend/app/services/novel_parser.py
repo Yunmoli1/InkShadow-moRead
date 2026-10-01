@@ -1,23 +1,33 @@
 """Novel file parsing: TXT chapter splitting & EPUB extraction (stdlib only)."""
 from __future__ import annotations
 
+import posixpath
 import re
+import shutil
 import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .. import config
 from ..database import SessionLocal
 from ..models import Chapter, Novel
 
 CHAPTER_PATTERNS = [
-    re.compile(r"^\s*第[0-9一二三四五六七八九十百千零两]+[章节卷回部集篇][^\n]{0,60}$"),
+    # 第X章/节/卷/回/部/集/篇 —— 允许"第 1 章"式空格、少量装饰前缀（【【★* 等）
+    re.compile(r"^[\[\s（(【★☆＊*#\-—·]{0,4}第\s*[0-9一二三四五六七八九十百千零两]+\s*[章节卷回部集篇][^\n]{0,60}$"),
     re.compile(r"^\s*Chapter\s+\d+.*$", re.IGNORECASE),
-    re.compile(r"^\s*(序章|楔子|引子|前言|后记|终章|番外)[^\n]{0,40}$"),
+    re.compile(r"^\s*(序章|楔子|引子|前言|后记|终章|番外|序言|尾声)[^\n]{0,40}$"),
+    # 纯数字行（"123"）
+    re.compile(r"^\d{1,4}$"),
+    # 数字编号标题（"1、标题" / "12. 标题" / "3：标题"）
+    re.compile(r"^\d{1,4}\s*[、.．:：]\s*\S[^\n]{0,50}$"),
+    # （一） / (十二) 式
+    re.compile(r"^[（(]\s*[0-9一二三四五六七八九十百]{1,6}\s*[）)]\s*[^\n]{0,40}$"),
 ]
 INLINE_SIZE_LIMIT = 2 * 1024 * 1024  # store content inline below 2MB total
 
@@ -48,8 +58,11 @@ def split_txt_into_chapters(text: str) -> list[tuple[str, str]]:
     return chapters
 
 
-def parse_epub(path: Path) -> tuple[str, str, list[tuple[str, str]]]:
-    """Extract (title, author, chapters) from an EPUB file."""
+def parse_epub(path: Path) -> tuple[str, str, list[tuple[str, str]], dict[str, bytes]]:
+    """Extract (title, author, chapters, images) from an EPUB file.
+
+    Inline images become text markers ``[img:<name>]`` on their own line;
+    their bytes are returned so the importer can serve them per novel."""
     with zipfile.ZipFile(path) as zf:
         container = ET.fromstring(zf.read("META-INF/container.xml"))
         rootfile = next(c for c in container.iter() if c.tag.endswith("rootfile"))
@@ -74,23 +87,76 @@ def parse_epub(path: Path) -> tuple[str, str, list[tuple[str, str]]]:
             elif el.tag.endswith("itemref"):
                 spine.append(el.attrib["idref"])
         chapters: list[tuple[str, str]] = []
+        images: dict[str, bytes] = {}
+        lower_names = {n.lower(): n for n in zf.namelist()}
         for idref in spine:
             href = manifest.get(idref)
             if not href:
                 continue
-            full = f"{opf_dir}/{href}" if opf_dir else href
+            # href 在 OPF 中可能被 URL 编码（空格 → %20 等），必须解码后再查 zip
+            full = unquote(f"{opf_dir}/{href}" if opf_dir else href)
             try:
                 html = zf.read(full).decode("utf-8", errors="replace")
             except KeyError:
-                continue
+                # 兜底：按文件名（忽略目录与大小写）匹配 zip 条目
+                base = full.rsplit("/", 1)[-1].lower()
+                match = lower_names.get(base)
+                if match is None:
+                    continue
+                html = zf.read(match).decode("utf-8", errors="replace")
+            html = _extract_epub_images(zf, full, html, images)
             text = _html_to_text(html)
-            if len(text.strip()) < 20:
-                continue
+            if len(text.strip()) < 5 and not re.search(r"\[img:[\w.\-]+\]", text):
+                continue  # 只跳过真正的空白页（封面/版权等），保留短章节
             t = _first_heading(html) or f"章节 {len(chapters) + 1}"
             chapters.append((t, text))
         if not chapters:
             raise ValueError("EPUB 中未找到可读章节")
-        return title or path.stem, author, chapters
+        return title or path.stem, author, chapters, images
+
+
+_IMG_TAG_RE = re.compile(r"<(img|image)\b[^>]*>", re.I)
+_IMG_SRC_RE = re.compile(r"""(?:src|xlink:href|href)\s*=\s*["']([^"']+)["']""", re.I)
+
+
+def _extract_epub_images(zf: zipfile.ZipFile, chapter_path: str, html: str, images: dict[str, bytes]) -> str:
+    """Replace <img>/<image> tags with [img:<name>] markers; collect bytes.
+
+    Zip entry paths are resolved relative to the chapter document, matching
+    how EPUB OCF references work."""
+    from urllib.parse import unquote
+
+    chapter_dir = chapter_path.rsplit("/", 1)[0] if "/" in chapter_path else ""
+    cache: dict[str, str | None] = {}
+
+    def _resolve(src: str) -> str | None:
+        src = unquote(src.split("#")[0].strip())
+        if not src or src.startswith(("http://", "https://", "data:")):
+            return None
+        if src in cache:
+            return cache[src]
+        target = posixpath.normpath(posixpath.join(chapter_dir, src)) if chapter_dir else posixpath.normpath(src)
+        name = None
+        try:
+            zf.getinfo(target)
+            base = posixpath.basename(target)
+            stem, ext = posixpath.splitext(base)
+            ext = ext.lower() or ".img"
+            name = f"img{len(images) + 1:03d}_{re.sub(r'[\\/:*?\"<>| ]', '_', stem)[:40]}{ext}"
+            images[name] = zf.read(target)
+        except KeyError:
+            name = None
+        cache[src] = name
+        return name
+
+    def _sub(m: re.Match) -> str:
+        src_m = _IMG_SRC_RE.search(m.group(0))
+        if not src_m:
+            return ""
+        name = _resolve(src_m.group(1))
+        return f"\n\n[img:{name}]\n\n" if name else ""
+
+    return _IMG_TAG_RE.sub(_sub, html)
 
 
 def _html_to_text(html: str) -> str:
@@ -123,8 +189,9 @@ async def import_novel_file(
     fallback_title is used when the TXT first line is a chapter heading
     (i.e. the file itself carries no book title)."""
     suffix = path.suffix.lower()
+    images: dict[str, bytes] = {}
     if suffix == ".epub":
-        ftitle, fauthor, chapters = parse_epub(path)
+        ftitle, fauthor, chapters, images = parse_epub(path)
         title = title or ftitle
         author = author or fauthor
     elif suffix == ".txt":
@@ -141,20 +208,38 @@ async def import_novel_file(
     if not chapters:
         raise ValueError("未解析到章节")
 
-    novel_dir = config.NOVELS_DIR / uuid.uuid4().hex[:12]
-    novel_dir.mkdir(parents=True, exist_ok=True)
+    src_size = path.stat().st_size
     async with SessionLocal() as db:
         exists = await db.scalar(select(Novel).where(Novel.title == title, Novel.author == author))
+        if exists and exists.total_chapters == len(chapters):
+            # idempotent import; older imports may predate image extraction,
+            # so backfill images + marked content when they are missing.
+            if suffix == ".epub" and images and not await _novel_has_images(db, exists.id):
+                await _backfill_epub_images(db, exists, chapters, images)
+            return exists
         if exists:
-            return exists  # idempotent import
-        novel = Novel(
-            title=title or path.stem, author=author, source_url=source_url,
-            file_type=suffix.lstrip("."), total_chapters=len(chapters),
-            file_size=path.stat().st_size,
-        )
-        db.add(novel)
-        await db.flush()
-        inline = path.stat().st_size <= INLINE_SIZE_LIMIT and suffix == ".txt"
+            # 同一本书重导但解析结果不同（通常是切分规则升级）→ 重建全部章节
+            novel = exists
+            await db.execute(delete(Chapter).where(Chapter.novel_id == novel.id))
+            old_dir = config.NOVELS_DIR / novel.id
+            if old_dir.exists():
+                shutil.rmtree(old_dir, ignore_errors=True)
+        else:
+            novel = Novel(
+                title=title or path.stem, author=author, source_url=source_url,
+                file_type=suffix.lstrip("."), total_chapters=len(chapters),
+                file_size=src_size,
+            )
+            db.add(novel)
+            await db.flush()
+        novel_dir = config.NOVELS_DIR / novel.id
+        novel_dir.mkdir(parents=True, exist_ok=True)
+        if images:
+            img_dir = config.COVERS_DIR / novel.id / "images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            for name, data in images.items():
+                (img_dir / name).write_bytes(data)
+        inline = src_size <= INLINE_SIZE_LIMIT and suffix == ".txt"
         for i, (ctitle, cbody) in enumerate(chapters):
             if inline:
                 cpath, ccontent = "", cbody
@@ -167,9 +252,53 @@ async def import_novel_file(
                 content_path=cpath, content=ccontent,
                 word_count=len(cbody),
             ))
+        novel.total_chapters = len(chapters)
+        novel.file_size = src_size
+        novel.file_type = suffix.lstrip(".")
         await db.commit()
         await db.refresh(novel)
         return novel
+
+
+async def _novel_has_images(db, novel_id: str) -> bool:
+    """True if any chapter of the novel already carries [img:] markers."""
+    row = await db.scalar(
+        select(Chapter.id).where(Chapter.novel_id == novel_id, Chapter.content.like("%[img:%"))
+    )
+    if row is not None:
+        return True
+    for (cpath,) in (await db.execute(
+        select(Chapter.content_path).where(Chapter.novel_id == novel_id, Chapter.content_path != "")
+    )).all():
+        try:
+            if "[img:" in (config.DATA_DIR / cpath).read_text(encoding="utf-8", errors="ignore"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+async def _backfill_epub_images(db, novel: Novel, chapters: list[tuple[str, str]], images: dict[str, bytes]) -> None:
+    """Refresh an older EPUB import with extracted images and [img:] markers."""
+    img_dir = config.COVERS_DIR / novel.id / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    for name, data in images.items():
+        (img_dir / name).write_bytes(data)
+    rows = (await db.execute(
+        select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.idx)
+    )).scalars().all()
+    for i, row in enumerate(rows):
+        if i >= len(chapters):
+            break
+        _, body = chapters[i]
+        if row.content_path:
+            p = config.DATA_DIR / row.content_path
+            if p.exists():
+                p.write_text(f"{row.title}\n\n{body}", encoding="utf-8")
+        else:
+            row.content = body
+        row.word_count = len(body)
+    await db.commit()
 
 
 async def _read_text_any_encoding(path: Path) -> str:

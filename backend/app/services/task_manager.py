@@ -7,6 +7,7 @@ fanned out to SSE subscribers, and kept in a log tail persisted to DB.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import uuid
 from collections import deque
@@ -19,12 +20,45 @@ from .. import config
 from ..database import SessionLocal
 from ..models import DownloadTask, MediaItem, Novel
 from . import tool_registry
+from . import netenv
 from .novel_parser import import_novel_file
 from .web_saver import save_single_page
 
 MAX_LOG_LINES = 200
 MAX_CONCURRENT_TASKS = 2
 TERMINAL_STATES = {"completed", "failed", "canceled"}
+
+
+class NoContentError(Exception):
+    """Tool exited 0 but nothing usable was produced (e.g. only an index.html
+    shell). Treated as a failure so the fallback chain keeps trying."""
+
+
+# settings.toml for novel-cli (Novel Downloader): all paths CWD-relative so
+# downloads land inside the task's own output dir.
+_NOVEL_CLI_SETTINGS = """\
+[general]
+raw_data_dir = "./raw_data"
+output_dir = "./downloads"
+cache_dir = "./novel_cache"
+request_interval = 0.5
+workers = 4
+max_connections = 10
+retry_times = 3
+backoff_factor = 2.0
+timeout = 30.0
+
+[general.output]
+formats = ["txt"]
+append_timestamp = false
+filename_template = "{title}_{author}"
+include_picture = true
+
+[general.debug]
+save_html = false
+log_dir = "./logs"
+log_level = "INFO"
+"""
 
 
 def _now() -> datetime:
@@ -159,7 +193,40 @@ class TaskManager:
                 await self._update_status(task_id, status="failed", message=f"任务执行异常: {exc}")
                 await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
 
-    async def _execute(self, task_id: str, spec: tool_registry.ToolSpec, url: str, options: dict) -> None:
+    async def _switch_and_retry(
+        self, task_id: str, spec: tool_registry.ToolSpec, url: str, options: dict,
+        log_tail: deque, reason: str, _fallback: list[tool_registry.ToolSpec],
+    ) -> bool:
+        """Switch the task to the next installed fallback tool and re-run it.
+
+        Returns True when a retry was started (the caller must then return
+        without touching the task's terminal state again)."""
+        nxt = next((s for s in _fallback if tool_registry.resolve_executable(s)), None)
+        if nxt is None:
+            return False
+        remaining = [s for s in _fallback if s is not nxt]
+        log_tail.append(f"--- {reason}，自动切换工具: {nxt.display} ---")
+        await self._update_status(
+            task_id, message=f"{reason}，自动切换到 {nxt.display} 重试…",
+            log_lines=list(log_tail)[-MAX_LOG_LINES:],
+        )
+        await bus.publish(task_id, {
+            "task_id": task_id, "status": "running",
+            "message": f"自动切换到 {nxt.display} 重试",
+        })
+        async with SessionLocal() as db:
+            task = await db.get(DownloadTask, task_id)
+            task.tool = nxt.name
+            await db.commit()
+        await self._execute(task_id, nxt, url, options, _fallback=remaining)
+        return True
+
+    async def _execute(
+        self, task_id: str, spec: tool_registry.ToolSpec, url: str, options: dict,
+        _fallback: list[tool_registry.ToolSpec] | None = None,
+    ) -> None:
+        if _fallback is None:
+            _fallback = tool_registry.fallback_chain(spec)
         log_tail: deque[str] = deque(maxlen=MAX_LOG_LINES)
 
         async with SessionLocal() as db:
@@ -177,9 +244,20 @@ class TaskManager:
         if spec.name == "builtin-web-saver":
             await self._run_builtin_saver(task_id, url, out_dir, log_tail)
             return
+        if spec.name == "web2novel":
+            await self._run_web2novel(task_id, url, out_dir, log_tail)
+            return
+        if spec.name == "item-fetch":
+            await self._run_item_fetch(task_id, url, out_dir, log_tail, options)
+            return
 
         exe = tool_registry.resolve_executable(spec)
         if exe is None:
+            if await self._switch_and_retry(
+                task_id, spec, url, options, log_tail,
+                f"工具 {spec.display} 未安装", _fallback,
+            ):
+                return
             await self._update_status(
                 task_id, status="failed",
                 message=f"工具 {spec.display} 未安装。请先安装：{spec.install_hint}",
@@ -195,9 +273,60 @@ class TaskManager:
             await db.commit()
 
         try:
-            # lncrawl 4.x writes output relative to CWD; archivebox needs its data dir
-            cwd = out_dir if spec.name in ("lncrawl", "archivebox") else None
+            # lncrawl 4.x / abx-dl / archivebox / novel-cli write output relative to CWD
+            cwd = out_dir if spec.name in ("lncrawl", "abx-dl", "archivebox", "novel-downloader") else None
             Path(cwd).mkdir(parents=True, exist_ok=True) if cwd else None
+            env = dict(os.environ)
+            env["PATH"] = tool_registry.tool_search_path()
+            env.update(netenv.proxy_env(await netenv.get_proxy_url()))
+            # Tools inspect their own stdout encoding (ArchiveBox refuses GBK);
+            # piped output on Windows defaults to the ANSI code page otherwise.
+            env.setdefault("PYTHONUTF8", "1")
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            if spec.name == "DXC":
+                # DXC saves under <HOME>/Downloads/DXC by default; pin HOME to
+                # the task dir so _post_process finds the files (rglob scan).
+                env["HOME"] = env["USERPROFILE"] = out_dir
+            if spec.name == "novel-downloader":
+                # novel-cli requires settings.toml and is interactive when it
+                # is missing (stdin is DEVNULL) — seed one that keeps every
+                # artifact inside the task dir via CWD-relative paths.
+                Path(cwd).mkdir(parents=True, exist_ok=True)
+                (Path(cwd) / "settings.toml").write_text(_NOVEL_CLI_SETTINGS, encoding="utf-8")
+            if spec.name == "archivebox":
+                # Edge ships with Windows and powers the PDF/screenshot
+                # extractors; without CHROME_BINARY they all fail.
+                if "CHROME_BINARY" not in env:
+                    edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+                    if Path(edge).exists():
+                        env["CHROME_BINARY"] = edge
+                # `archivebox add` refuses to run outside an initialized
+                # collection; the task dir is always fresh, so init it first.
+                # stdin must be DEVNULL: an inherited (possibly invalid) stdin
+                # handle makes the CLI exit 2 without any output.
+                Path(cwd).mkdir(parents=True, exist_ok=True)
+                init_rc = init_out = None
+                for attempt in (1, 2):  # one retry: transient AV/file locks
+                    init = await asyncio.create_subprocess_exec(
+                        argv[0], "init",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        creationflags=tool_registry._NO_WINDOW,
+                        cwd=cwd, env=env,
+                    )
+                    init_out, _ = await init.communicate()
+                    init_rc = init.returncode
+                    if init_rc == 0:
+                        break
+                    log_tail.append(f"[init] 第 {attempt} 次尝试失败（退出码 {init_rc}），重试中…")
+                    await asyncio.sleep(2)
+                for line in (init_out or b"").decode("utf-8", errors="replace").splitlines()[-25:]:
+                    log_tail.append(f"[init] {line.strip()}")
+                if init_rc != 0:
+                    raise RuntimeError(
+                        f"archivebox init 失败（退出码 {init_rc}），无法创建归档集合。"
+                        f"完整输出见任务日志。")
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
@@ -205,9 +334,18 @@ class TaskManager:
                 stdin=asyncio.subprocess.DEVNULL,
                 creationflags=tool_registry._NO_WINDOW,
                 cwd=cwd,
+                env=env,
             )
         except Exception as exc:
-            await self._update_status(task_id, status="failed", message=f"无法启动工具进程: {exc}")
+            if await self._switch_and_retry(
+                task_id, spec, url, options, log_tail, f"工具 {spec.display} 启动失败", _fallback,
+            ):
+                return
+            await self._update_status(
+                task_id, status="failed",
+                message=f"无法启动工具进程: {exc}",
+                log_lines=list(log_tail)[-MAX_LOG_LINES:],
+            )
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
             return
 
@@ -226,10 +364,22 @@ class TaskManager:
             return [p for p in parts if p.strip()]
 
         assert proc.stdout is not None
+        STALL_TIMEOUT = 300  # a tool printing nothing for 5 min is considered hung
         while True:
             if task_id in self.cancel_flags:
                 break
-            raw = await proc.stdout.read(1024)
+            try:
+                raw = await asyncio.wait_for(proc.stdout.read(1024), timeout=STALL_TIMEOUT)
+            except asyncio.TimeoutError:
+                log_tail.append(f"[watchdog] 工具已 {STALL_TIMEOUT}s 无任何输出，判定卡死并终止")
+                await self._terminate(proc)
+                rc = await proc.wait()
+                self.processes.pop(task_id, None)
+                canceled = task_id in self.cancel_flags
+                paused = False
+                await self._finish(task_id, spec, url, options, out_dir, log_tail, rc, canceled, False, _fallback,
+                                   note="工具卡死无输出，已被自动终止", progress=progress)
+                return
             if not raw:
                 break
             lines = split_lines(raw.decode("utf-8", errors="replace"))
@@ -259,7 +409,14 @@ class TaskManager:
 
         canceled = task_id in self.cancel_flags
         paused = self.pause_flags.get(task_id) is not None and not canceled
+        await self._finish(task_id, spec, url, options, out_dir, log_tail, rc, canceled, paused, _fallback, progress=progress)
 
+    async def _finish(
+        self, task_id: str, spec: tool_registry.ToolSpec, url: str, options: dict,
+        out_dir: str, log_tail: deque, rc: int, canceled: bool, paused: bool,
+        _fallback: list[tool_registry.ToolSpec] | None, note: str = "", progress: float = 0.0,
+    ) -> None:
+        prefix = f"{note}；" if note else ""
         async with SessionLocal() as db:
             task = await db.get(DownloadTask, task_id)
             task.log_tail = list(log_tail)[-MAX_LOG_LINES:]  # type: ignore[assignment]
@@ -275,7 +432,19 @@ class TaskManager:
             )
             await bus.publish(task_id, {"task_id": task_id, "status": "paused", "progress": progress})
         elif rc == 0:
-            imported = await self._post_process(task_id, spec, url, out_dir)
+            try:
+                imported = await self._post_process(task_id, spec, url, out_dir)
+            except NoContentError as exc:
+                if await self._switch_and_retry(
+                    task_id, spec, url, options, log_tail, str(exc), _fallback or [],
+                ):
+                    return
+                await self._update_status(
+                    task_id, status="failed", message=f"{prefix}{exc}",
+                    log_lines=list(log_tail)[-MAX_LOG_LINES:],
+                )
+                await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": "no-content"})
+                return
             await self._update_status(
                 task_id, status="completed", progress=100.0,
                 message=f"下载完成，已导入 {imported} 项资源",
@@ -283,14 +452,130 @@ class TaskManager:
             await bus.publish(task_id, {"task_id": task_id, "status": "completed", "progress": 100.0, "imported": imported})
         else:
             tail = "\n".join(list(log_tail)[-5:])
+            if await self._switch_and_retry(
+                task_id, spec, url, options, log_tail,
+                f"工具 {spec.display} 失败（退出码 {rc}）", _fallback or [],
+            ):
+                return
             await self._update_status(
-                task_id, status="failed", message=f"工具退出码 {rc}。最近日志：{tail[-400:]}",
+                task_id, status="failed", message=f"{prefix}工具退出码 {rc}。最近日志：{tail[-400:]}",
             )
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": f"exit code {rc}"})
 
         self.cancel_flags.pop(task_id, None)
         self.pause_flags.pop(task_id, None)
         self._worker_tasks.pop(task_id, None)
+
+    # -- builtin direct-file fetcher (selective / archive downloads) ----------
+
+    async def _run_item_fetch(self, task_id: str, url: str, out_dir: str,
+                              log_tail: deque, options: dict) -> None:
+        import re as _re
+        from urllib.parse import unquote
+
+        import httpx
+
+        from .netenv import get_proxy_url, should_proxy
+
+        urls = [u for u in (options.get("urls") or [url]) if u]
+        total = max(1, len(urls))
+        proxy = await get_proxy_url()
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        done = ok = 0
+
+        async def fetch_one(client: httpx.AsyncClient, u: str) -> None:
+            nonlocal ok
+            resp = await client.get(u)
+            resp.raise_for_status()
+            name = None
+            cd = resp.headers.get("content-disposition", "")
+            m = _re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
+            if m:
+                name = unquote(m.group(1).strip())
+            if not name:
+                path = u.split("://", 1)[-1].split("?", 1)[0].rstrip("/")
+                name = unquote(path.rsplit("/", 1)[-1]) or "file"
+            name = _re.sub(r'[\\/:*?"<>|]+', "_", name)[:120] or "file"
+            (Path(out_dir) / name).write_bytes(resp.content)
+            ok += 1
+            log_tail.append(f"saved: {name} ({len(resp.content)} bytes)")
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120,
+                                         headers={"User-Agent": ua},
+                                         proxy=proxy if should_proxy(url, proxy) else None) as client:
+                for i, u in enumerate(urls):
+                    if task_id in self.cancel_flags:
+                        break
+                    try:
+                        await fetch_one(client, u)
+                    except Exception as exc:
+                        log_tail.append(f"FAILED: {u} ({exc})")
+                    await self._update_status(
+                        task_id, progress=round((i + 1) / total * 90, 1),
+                        message=f"已下载 {ok}/{i + 1} 个文件",
+                        log_lines=list(log_tail)[-MAX_LOG_LINES:],
+                    )
+                    await bus.publish(task_id, {"task_id": task_id, "status": "running",
+                                                "message": f"已下载 {ok}/{i + 1} 个文件"})
+            if task_id in self.cancel_flags:
+                await self._update_status(task_id, status="canceled", message="已取消")
+                await bus.publish(task_id, {"task_id": task_id, "status": "canceled"})
+                return
+            if ok == 0:
+                raise RuntimeError("所有文件均下载失败")
+            imported = await self._post_process(task_id, tool_registry.get_spec("item-fetch"), url, out_dir)
+            await self._update_status(task_id, status="completed", progress=100.0,
+                                      message=f"下载完成（{ok}/{total}），已导入 {imported} 项")
+            await bus.publish(task_id, {"task_id": task_id, "status": "completed",
+                                        "progress": 100.0, "imported": imported})
+        except Exception as exc:
+            await self._update_status(task_id, status="failed", message=f"文件下载失败: {exc}",
+                                      log_lines=list(log_tail)[-MAX_LOG_LINES:])
+            await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
+        finally:
+            self.cancel_flags.pop(task_id, None)
+            self._worker_tasks.pop(task_id, None)
+
+    # -- builtin webpage→novel converter --------------------------------------
+
+    async def _run_web2novel(self, task_id: str, url: str, out_dir: str, log_tail: deque) -> None:
+        from .web2novel import save_web_novel
+        try:
+            async for event in save_web_novel(url, out_dir):
+                if task_id in self.cancel_flags:
+                    break
+                if event.get("log"):
+                    log_tail.append(event["log"])
+                await self._update_status(
+                    task_id, progress=event.get("progress"), message=event.get("message", ""),
+                    log_lines=list(log_tail)[-MAX_LOG_LINES:],
+                )
+                await bus.publish(task_id, {"task_id": task_id, "status": "running", **{
+                    k: v for k, v in event.items() if k in ("progress", "message")
+                }})
+            if task_id in self.cancel_flags:
+                await self._update_status(task_id, status="canceled", message="已取消")
+                await bus.publish(task_id, {"task_id": task_id, "status": "canceled"})
+            else:
+                spec = tool_registry.get_spec("web2novel")
+                imported = await self._post_process(task_id, spec, url, out_dir)
+                await self._update_status(task_id, status="completed", progress=100.0,
+                                          message=f"已转为小说，导入 {imported} 项")
+                await bus.publish(task_id, {"task_id": task_id, "status": "completed", "progress": 100.0})
+        except Exception as exc:
+            if await self._switch_and_retry(
+                task_id, tool_registry.get_spec("web2novel"), url, {}, log_tail,
+                f"网页转小说失败: {exc}", [],
+            ):
+                return
+            await self._update_status(task_id, status="failed", message=f"网页转小说失败: {exc}")
+            await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
+        finally:
+            self.cancel_flags.pop(task_id, None)
+            self._worker_tasks.pop(task_id, None)
 
     # -- builtin single page saver -------------------------------------------
 
@@ -340,6 +625,27 @@ class TaskManager:
         ]
         return [d for d in dirs if d.exists()]
 
+    async def _harvest_sonovel_artifacts(self, task_id: str, out_dir: str) -> int:
+        """so-novel has no output-path option: it writes into its own app dir
+        (tools/bin/so-novel/SoNovel/downloads). Copy files produced during
+        this task back into the task dir for import."""
+        async with SessionLocal() as db:
+            task = await db.get(DownloadTask, task_id)
+            since = (task.started_at.timestamp() - 60) if task and task.started_at else 0
+        src = config.TOOLS_DIR / "bin" / "so-novel" / "SoNovel" / "downloads"
+        if not src.is_dir():
+            return 0
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for f in src.rglob("*"):
+            if f.is_file() and f.stat().st_mtime >= since:
+                target = out / f.relative_to(src)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(f.read_bytes())
+                copied += 1
+        return copied
+
     async def _harvest_lncrawl_artifacts(self, task_id: str, out_dir: str, started_at: datetime | None) -> int:
         """lncrawl 4.x writes artifacts to its own app-data dir; copy new ones back."""
         import zipfile as zf
@@ -370,7 +676,10 @@ class TaskManager:
         return copied
 
     async def _post_process(self, task_id: str, spec: tool_registry.ToolSpec, url: str, out_dir: str) -> int:
-        """Scan the output dir and import files into media/novel libraries."""
+        """Scan the output dir and import files into media/novel libraries.
+
+        Raises NoContentError when the result is empty or only a webpage shell
+        and the tool is not an explicit page archiver."""
         imported = 0
         root = (
             Path(out_dir) if out_dir.startswith(config.DATA_DIR.as_posix())
@@ -379,6 +688,8 @@ class TaskManager:
         base = root if root.exists() else config.DOWNLOADS_DIR / task_id
         if not base.exists():
             return 0
+        if spec.name == "so-novel":
+            await self._harvest_sonovel_artifacts(task_id, out_dir)
         if spec.category == "novel":
             if spec.name == "lncrawl":
                 async with SessionLocal() as db:
@@ -398,6 +709,8 @@ class TaskManager:
                         imported += 1
                     except Exception:
                         pass
+            if imported == 0:
+                raise NoContentError("工具执行成功但未下载到可导入的章节内容")
             return imported
         # media: classify files
         kind_map = {
@@ -405,13 +718,24 @@ class TaskManager:
             ".bmp": "image", ".avif": "image", ".svg": "image",
             ".mp4": "video", ".mkv": "video", ".webm": "video", ".mov": "video", ".avi": "video", ".flv": "video",
             ".mp3": "audio", ".m4a": "audio", ".flac": "audio", ".wav": "audio", ".ogg": "audio", ".opus": "audio",
-            ".html": "page", ".pdf": "doc",
+            ".html": "page", ".htm": "page", ".pdf": "doc",
+            ".zip": "file", ".rar": "file", ".7z": "file", ".tar": "file", ".gz": "file",
+            ".bz2": "file", ".xz": "file", ".tgz": "file", ".apk": "file", ".exe": "file",
+            ".msi": "file", ".iso": "file", ".epub": "file",
         }
+        # yt-dlp 分离流残留（如 ".f30280.m4a" / ".f100026.mp4"）：ffmpeg 合并成功后
+        # 会删除原流；但合并失败或中断时会留下无扩展名/带流 ID 的孤儿文件，跳过导入。
+        stream_id_re = re.compile(r"\.f\d+$")
+        page_imported = 0
         async with SessionLocal() as db:
             for f in sorted(base.rglob("*")):
                 if not f.is_file():
                     continue
                 if f.name.startswith(".") or f.suffix.lower() in (".part", ".ytdl", ".tmp", ".json", ".txt", ".log"):
+                    continue
+                stem = f.stem
+                # 跳过未合并的分离流文件（title.f30280.mp4 / title.f30280 之类）
+                if stream_id_re.search(stem):
                     continue
                 mtype = kind_map.get(f.suffix.lower())
                 if not mtype:
@@ -431,7 +755,14 @@ class TaskManager:
                     extra={"task_id": task_id, "dir": base.name},
                 ))
                 imported += 1
+                if mtype == "page":
+                    page_imported += 1
             await db.commit()
+        # 只有网页外壳而没有目标内容：对非网页归档任务按失败处理（继续回退）
+        if imported == 0 and spec.category != "page":
+            raise NoContentError("工具执行成功但未下载到可导入的内容")
+        if imported > 0 and page_imported == imported and spec.category != "page":
+            raise NoContentError("只抓取到网页外壳（index.html），未获得目标内容（站点可能不支持或需要代理）")
         return imported
 
     # -- helpers ------------------------------------------------------------

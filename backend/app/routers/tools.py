@@ -1,6 +1,8 @@
-"""Tool endpoints: list, search, download."""
+"""Tool endpoints: list, search, preview, download."""
 
 import asyncio
+import json as _json
+import re
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
@@ -8,7 +10,8 @@ from sqlalchemy import select
 from ..database import SessionLocal
 from ..models import DownloadTask
 from ..schemas import (
-    DownloadCreated, DownloadRequest, SearchResult, SearchRequest, ToolOut,
+    DownloadCreated, DownloadItemsIn, DownloadRequest, PreviewRequest,
+    SearchResult, SearchRequest, ToolOut,
 )
 from ..services import tool_registry
 from ..services.task_manager import manager
@@ -44,7 +47,12 @@ def _pick_tool(content_type: str, requested: str | None, url: str) -> tool_regis
         return spec
     # auto detection by URL extension first
     low = url.lower().split("?")[0]
-    if low.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
+    # 小说站特征（.php 结尾的小说页不能按"网页归档"处理）
+    if "pixiv.net/novel" in low or re.search(r"/(novel|book|xiaoshuo|read)/", low):
+        content_type = content_type if content_type != "auto" else "novel"
+    elif re.search(r"\.(zip|rar|7z|tar|gz|tgz|bz2|xz|apk|exe|msi|iso)$", low):
+        content_type = content_type if content_type != "auto" else "file"
+    elif low.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
         content_type = content_type if content_type != "auto" else "image"
     elif low.endswith((".mp4", ".mkv", ".webm", ".mov")):
         content_type = content_type if content_type != "auto" else "video"
@@ -66,7 +74,7 @@ def _pick_tool(content_type: str, requested: str | None, url: str) -> tool_regis
 
     category = {
         "image": "image", "video": "video", "audio": "video",
-        "page": "page", "novel": "novel",
+        "page": "page", "novel": "novel", "file": "file",
     }.get(content_type, "universal")
 
     spec = _first_installed(category, skip_builtin=True)
@@ -121,6 +129,143 @@ async def search_with_tool(tool_name: str, body: SearchRequest) -> SearchResult:
     if not results and proc.returncode != 0:
         return SearchResult(tool=tool_name, results=[], message=f"搜索无结果（工具退出码 {proc.returncode}）")
     return SearchResult(tool=tool_name, results=results)
+
+
+@router.post("/preview")
+async def preview_url(body: PreviewRequest) -> dict:
+    """预览下载目标：按 URL 自动选择工具，并尝试快速探测内容信息。
+
+    probe 为 None 表示该工具不支持快速探测（或探测超时），不影响下载。"""
+    spec = _pick_tool(body.content_type or "auto", body.tool, body.url)
+    probe = await _probe_target(spec, body.url)
+    return {
+        "url": body.url,
+        "tool": {
+            "name": spec.name, "display": spec.display,
+            "category": spec.category, "remark": spec.remark,
+        },
+        "probe": probe,
+    }
+
+
+_PROBE_TIMEOUT = 30
+
+
+async def _probe_target(spec: tool_registry.ToolSpec, url: str) -> dict | None:
+    exe = tool_registry.resolve_executable(spec)
+    if exe is None:
+        return None
+    argv: list[str] | None = None
+    if spec.name == "yt-dlp":
+        argv = [exe, "-J", "--flat-playlist", "--no-playlist", url]
+    elif spec.name == "gallery-dl":
+        argv = [exe, "-g", url]
+    elif spec.name == "image-harvest":
+        argv = [exe, url, "--list-only", "--list-format", "json"]
+    elif spec.name == "you-get":
+        argv = [exe, "--json", url]
+    if argv is None:
+        return {"note": f"{spec.display} 不支持快速预览，可直接开始下载"}
+
+    import os
+    env = {**os.environ, "PATH": tool_registry.tool_search_path(),
+           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL,
+            creationflags=tool_registry._NO_WINDOW,
+            env=env,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_PROBE_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"note": "预览超时（目标站点响应慢或需要代理），可直接开始下载"}
+    except Exception as exc:
+        return {"note": f"预览失败: {exc}"}
+
+    text = out.decode("utf-8", errors="replace").strip()
+    if spec.name == "yt-dlp" and text.startswith("{"):
+        try:
+            data = _json.loads(text)
+        except ValueError:
+            return None
+        if data.get("_type") == "playlist":
+            entries = [e for e in (data.get("entries") or []) if e]
+            items = []
+            for e in entries[:20]:
+                eurl = e.get("url") or e.get("webpage_url")
+                if not eurl and e.get("id"):
+                    eurl = f"https://www.youtube.com/watch?v={e['id']}"
+                if eurl:
+                    items.append({"title": e.get("title") or eurl, "url": eurl})
+            return {
+                "title": data.get("title") or url,
+                "count": data.get("playlist_count") or len(entries),
+                "items": items,
+                "note": f"共 {len(entries)} 个条目，可勾选下载" if entries else "空列表",
+            }
+        dur = data.get("duration")
+        return {
+            "title": data.get("title") or url,
+            "count": 1,
+            "items": [{"title": f"{data.get('extractor_key', '')} · {data.get('uploader') or ''}"
+                       + (f" · {int(dur // 60)}分{int(dur % 60)}秒" if dur else ""), "url": url}],
+            "note": "单个媒体文件",
+        }
+    if spec.name == "image-harvest" and text.startswith("["):
+        try:
+            items = _json.loads(text)
+        except ValueError:
+            return None
+        return {
+            "title": f"发现 {len(items)} 张图片",
+            "count": len(items),
+            "items": [{"title": (it.get("alt") or it.get("filename") or it.get("url", "?")), "url": it.get("url", "")}
+                      for it in items[:50] if it.get("url")],
+            "note": f"共 {len(items)} 张图片（前 50 项可勾选下载）",
+        }
+    if spec.name == "gallery-dl":
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("http")]
+        if lines:
+            return {
+                "title": f"发现 {len(lines)} 个媒体地址",
+                "count": len(lines),
+                "items": [{"title": ln.rsplit("/", 1)[-1][:60] or ln, "url": ln} for ln in lines[:50]],
+                "note": f"共 {len(lines)} 项（前 50 项可勾选下载）",
+            }
+        return {"note": "未探测到可直接下载的内容，仍可尝试下载"}
+    if spec.name == "you-get":
+        try:
+            data = _json.loads(text)
+        except ValueError:
+            return {"note": "未探测到可直接下载的内容，仍可尝试下载"}
+        streams = (data.get("data") or {}).get("streams") or {}
+        best = sorted(streams.values(), key=lambda s: s.get("size") or 0, reverse=True)
+        if best:
+            s = best[0]
+            return {"title": data.get("title") or url, "count": 1,
+                    "items": [{"title": f"{s.get('quality') or ''} {s.get('container') or ''}".strip() or url,
+                               "url": url}],
+                    "note": "单个媒体文件"}
+    return None
+
+
+@router.post("/items/download", response_model=DownloadCreated, status_code=201)
+async def download_selected_items(body: DownloadItemsIn) -> DownloadCreated:
+    """选择性下载：直接抓取用户在预览界面勾选的资源直链（图片/视频/压缩包等）。"""
+    urls = [u.strip() for u in body.urls if u.strip()]
+    if not urls:
+        raise HTTPException(400, "未选择任何资源")
+    task = await manager.create_task(
+        tool="item-fetch", url=urls[0], options={"urls": urls},
+        dest_type="media", title=f"选择性下载 {len(urls)} 项",
+    )
+    return DownloadCreated(task_id=task.id, tool="item-fetch", status=task.status,
+                           message=f"已创建选择性下载任务（{len(urls)} 项）")
 
 
 @router.post("/auto/download", response_model=DownloadCreated, status_code=201)

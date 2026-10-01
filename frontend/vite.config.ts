@@ -32,6 +32,10 @@ export default defineConfig({
         // App shell + navigation precached; API traffic always hits local server.
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
         navigateFallback: '/index.html',
+        // 新版本立即接管，避免 exe 更新后浏览器仍使用旧缓存界面
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
             urlPattern: /^\/api\/media\/[\w-]+\/file/,

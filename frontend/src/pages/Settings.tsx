@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Database, Download, HardDrive, KeyRound, Lock, Server, Trash2, Upload } from 'lucide-react'
+import { Database, Download, Globe, HardDrive, KeyRound, Lock, Server, Trash2, Upload } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -159,6 +159,27 @@ export default function SettingsPage() {
                 </label>
               </div>
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 网络（代理） */}
+      <Card className="rounded-xl">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base"><Globe className="size-4 text-primary" /> 网络（访问海外资源）</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {settings && (
+            <label className="space-y-1.5">
+              <span className="text-xs text-muted-foreground">
+                代理地址（如 http://127.0.0.1:7890），留空则直连。对所有下载工具与内置网页快照生效；本地 AI 服务不走代理。
+              </span>
+              <Input
+                placeholder="http://127.0.0.1:7890"
+                defaultValue={settings.proxy_url}
+                onBlur={(e) => e.target.value !== settings.proxy_url && patch({ proxy_url: e.target.value })}
+              />
+            </label>
           )}
         </CardContent>
       </Card>

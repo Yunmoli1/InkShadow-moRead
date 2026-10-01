@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { FixedSizeList } from 'react-window'
 import {
   AlignLeft, ArrowLeft, BookOpen, ChevronLeft, ChevronRight, Eraser, List,
-  Minus, NotebookPen, Plus, RotateCcw, Save, Sparkles, Type, Volume2, X,
+  Minus, Moon, NotebookPen, Plus, RotateCcw, Save, Sparkles, Sun, Type, Volume2, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/controls'
@@ -14,6 +14,7 @@ import { useToast } from '@/components/Toast'
 import { tts } from '@/lib/tts'
 import { cn, haptic } from '@/lib/utils'
 import { useReaderPrefs } from '@/stores/settings'
+import { useTheme } from '@/stores/theme'
 
 interface Novel { id: string; title: string; author: string; total_chapters: number; last_chapter_idx: number }
 interface ChapterItem { id: string; idx: number; title: string; word_count: number }
@@ -33,6 +34,7 @@ export default function Reader() {
   const navigate = useNavigate()
   const { toast } = useToast()
   const prefs = useReaderPrefs()
+  const { theme, toggle: toggleTheme } = useTheme()
 
   const [novel, setNovel] = useState<Novel | null>(null)
   const [total, setTotal] = useState(0)
@@ -317,23 +319,25 @@ export default function Reader() {
     if (Math.abs(dx) > 60) turnPage(dx < 0 ? 1 : -1)
   }
 
-  const paperClass = `paper-${prefs.paper}`
+  // 未手动选过纸张时自动跟随应用主题（深色 → 夜间纸），手动选择后记忆用户偏好
+  const effectivePaper = prefs.paperAuto ? (theme === 'dark' ? 'dark' : 'paper') : prefs.paper
+  const paperClass = `paper-${effectivePaper}`
   const progressPct = novel ? ((chapterIdx + 1) / novel.total_chapters) * 100 : 0
 
   return (
     <div
-      className={cn('flex min-h-screen flex-col transition-colors', paperClass)}
+      className={cn('flex h-screen flex-col overflow-hidden transition-colors', paperClass)}
       onMouseUp={onMouseUp}
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
       onScroll={pokeIdle}
       onMouseMove={pokeIdle}
     >
-      {/* 顶部工具条（idle 自动隐藏） */}
+      {/* 顶部工具条（idle 自动隐藏）— 界面元素跟随应用主题令牌 */}
       <header
         className={cn(
-          'fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-2 border-b border-black/5 px-3 backdrop-blur transition-transform duration-300',
-          paperClass, showToolbar ? 'translate-y-0' : '-translate-y-full',
+          'fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-2 border-b border-border bg-card/90 px-3 text-card-foreground backdrop-blur transition-transform duration-300',
+          showToolbar ? 'translate-y-0' : '-translate-y-full',
         )}
       >
         <Button variant="ghost" size="iconSm" onClick={() => navigate('/shelf')} title="返回书架">
@@ -350,17 +354,20 @@ export default function Reader() {
           {prefs.mode === 'scroll' ? <AlignLeft className="size-5" /> : <BookOpen className="size-5" />}
         </Button>
         <FontControls />
-        <div className="flex gap-1 rounded-lg bg-black/5 p-0.5">
+        <div className="flex gap-1 rounded-lg bg-muted p-0.5">
           {PAPERS.map((p) => (
             <button
               key={p.key}
               title={p.label}
               onClick={() => { haptic(); prefs.setPaper(p.key) }}
-              className={cn('size-6 rounded-md border', prefs.paper === p.key ? 'border-primary ring-1 ring-primary' : 'border-black/10',
+              className={cn('size-6 rounded-md border', effectivePaper === p.key ? 'border-primary ring-1 ring-primary' : 'border-foreground/20',
                 `paper-${p.key}`)}
             />
           ))}
         </div>
+        <Button variant="ghost" size="iconSm" title="切换深浅主题" onClick={() => { haptic(); toggleTheme() }}>
+          {theme === 'light' ? <Moon className="size-5" /> : <Sun className="size-5" />}
+        </Button>
         <Button variant="ghost" size="iconSm" title="AI 摘要" onClick={askAi}>
           <Sparkles className={cn('size-5', panel === 'ai' && 'text-primary')} />
         </Button>
@@ -374,7 +381,7 @@ export default function Reader() {
 
       {/* TTS 调节条 */}
       {ttsOn && (
-        <div className="fixed left-1/2 top-16 z-40 flex w-72 -translate-x-1/2 items-center gap-3 rounded-xl border border-black/5 bg-card/95 p-3 text-xs shadow-lg backdrop-blur">
+        <div className="fixed left-1/2 top-16 z-40 flex w-72 -translate-x-1/2 items-center gap-3 rounded-xl border border-border bg-card/95 p-3 text-xs text-card-foreground shadow-lg backdrop-blur">
           <span className="shrink-0">语速 {ttsRate.toFixed(1)}x</span>
           <Slider min={0.5} max={2} step={0.1} value={[ttsRate]} onValueChange={([v]) => { setTtsRate(v); if (ttsOn) toggleTts() }} className="flex-1" />
           <span className="shrink-0">音调 {ttsPitch.toFixed(1)}</span>
@@ -382,11 +389,11 @@ export default function Reader() {
         </div>
       )}
 
-      <div className="flex flex-1 pt-14">
-        {/* 目录侧栏（react-window 虚拟滚动） */}
+      <div className="flex min-h-0 flex-1 pt-14">
+        {/* 目录侧栏（react-window 虚拟滚动）— 跟随应用主题 */}
         {showToc && (
-          <aside className="fixed inset-y-14 left-0 z-30 flex w-72 flex-col border-r border-black/5 bg-card/95 backdrop-blur md:static">
-            <div className="flex items-center justify-between border-b border-black/5 p-3">
+          <aside className="fixed inset-y-14 left-0 z-30 flex w-72 flex-col border-r border-border bg-card/95 text-card-foreground backdrop-blur md:static md:h-full md:shrink-0">
+            <div className="flex items-center justify-between border-b border-border p-3">
               <span className="text-sm font-medium">目录 · 共 {total} 章</span>
               <Button variant="ghost" size="iconSm" className="md:hidden" onClick={() => setShowToc(false)}>
                 <X className="size-4" />
@@ -416,7 +423,7 @@ export default function Reader() {
                       style={style}
                       className={cn(
                         'mx-2 flex w-[calc(100%-1rem)] items-center gap-2 rounded-lg px-3 text-left text-sm transition-colors',
-                        index === chapterIdx ? 'bg-primary/15 font-medium text-primary' : 'hover:bg-black/5',
+                        index === chapterIdx ? 'bg-primary/15 font-medium text-primary' : 'hover:bg-accent',
                       )}
                       onClick={() => { goChapter(index); if (window.innerWidth < 768) setShowToc(false) }}
                     >
@@ -431,7 +438,7 @@ export default function Reader() {
         )}
 
         {/* 正文 */}
-        <div ref={contentRef} className="relative min-w-0 flex-1 px-4 pb-24 pt-8 md:px-8">
+        <div ref={contentRef} onScroll={pokeIdle} className="relative min-w-0 flex-1 overflow-y-auto px-4 pb-24 pt-8 md:px-8">
           {loadingChapter || !chapter ? (
             <div className="mx-auto max-w-[860px] space-y-4">
               {Array.from({ length: 8 }).map((_, i) => (
@@ -449,9 +456,21 @@ export default function Reader() {
               <h1 className="mb-8 text-center font-serif text-xl font-semibold" style={{ fontSize: prefs.fontSize * 1.3 }}>
                 {chapter.title}
               </h1>
-              {chapter.content.split(/\n+/).filter((p) => p.trim()).map((p, i) => (
-                <p key={i}>{p}</p>
-              ))}
+              {chapter.content.split(/\n+/).filter((p) => p.trim()).map((p, i) => {
+                const img = p.trim().match(/^\[img:([\w.\-]+)\]$/)
+                if (img) {
+                  return (
+                    <img
+                      key={i}
+                      src={`/api/novels/${novelId}/images/${img[1]}`}
+                      alt=""
+                      loading="lazy"
+                      className="mx-auto my-4 max-w-full rounded-lg"
+                    />
+                  )
+                }
+                return <p key={i}>{p}</p>
+              })}
               <NavBottom />
             </motion.article>
           ) : (
@@ -472,7 +491,20 @@ export default function Reader() {
                   }}
                 >
                   <h1 className="mb-8 text-center font-serif text-lg font-semibold opacity-80">{chapter.title}</h1>
-                  {(pages[pageNum] ?? '').split(/\n+/).filter((p) => p.trim()).map((p, i) => <p key={i}>{p}</p>)}
+                  {(pages[pageNum] ?? '').split(/\n+/).filter((p) => p.trim()).map((p, i) => {
+                    const img = p.trim().match(/^\[img:([\w.\-]+)\]$/)
+                    if (img) {
+                      return (
+                        <img
+                          key={i}
+                          src={`/api/novels/${novelId}/images/${img[1]}`}
+                          alt=""
+                          className="mx-auto my-3 max-h-64 max-w-full rounded-lg object-contain"
+                        />
+                      )
+                    }
+                    return <p key={i}>{p}</p>
+                  })}
                   <p className="mt-10 text-center text-xs opacity-40">— {pageNum + 1} / {pages.length} —</p>
                 </motion.div>
               </AnimatePresence>
@@ -480,10 +512,10 @@ export default function Reader() {
           )}
         </div>
 
-        {/* 右侧面板：AI / 笔记 */}
+        {/* 右侧面板：AI / 笔记 — 跟随应用主题 */}
         {panel !== 'none' && (
-          <aside className="fixed inset-y-14 right-0 z-30 flex w-80 flex-col border-l border-black/5 bg-card/95 backdrop-blur md:static">
-            <div className="flex items-center justify-between border-b border-black/5 p-3">
+          <aside className="fixed inset-y-14 right-0 z-30 flex w-80 flex-col border-l border-border bg-card/95 text-card-foreground backdrop-blur md:static md:h-full md:shrink-0">
+            <div className="flex items-center justify-between border-b border-border p-3">
               <span className="text-sm font-medium">{panel === 'ai' ? 'AI 摘要' : `读书笔记（本章 ${notes.length}）`}</span>
               <Button variant="ghost" size="iconSm" onClick={() => setPanel('none')}>
                 <X className="size-4" />
@@ -521,7 +553,7 @@ export default function Reader() {
                     </div>
                   )}
                   {notes.map((n) => (
-                    <div key={n.id} className="group rounded-lg border border-black/5 bg-background/60 p-3 text-sm">
+                    <div key={n.id} className="group rounded-lg border border-border bg-background/60 p-3 text-sm">
                       {n.excerpt && <p className="mb-1.5 border-l-2 border-primary pl-2 font-serif text-xs italic opacity-70">{n.excerpt}</p>}
                       <p className="whitespace-pre-wrap">{n.content}</p>
                       <div className="mt-1.5 flex items-center justify-between text-[10px] opacity-50">
@@ -557,7 +589,7 @@ export default function Reader() {
       )}
 
       {/* 底部进度条 */}
-      <div className="fixed inset-x-0 bottom-0 z-40 h-1 bg-black/5">
+      <div className="fixed inset-x-0 bottom-0 z-40 h-1 bg-border/60">
         <div className="h-full bg-primary transition-all duration-300" style={{ width: `${progressPct}%` }} />
       </div>
     </div>
@@ -565,7 +597,7 @@ export default function Reader() {
 
   function NavBottom() {
     return (
-      <div className="mt-12 flex items-center justify-between border-t border-black/5 pt-6">
+      <div className="mt-12 flex items-center justify-between border-t border-foreground/10 pt-6">
         <Button variant="outline" size="sm" disabled={chapterIdx <= 0} onClick={() => goChapter(chapterIdx - 1)}>
           <ChevronLeft className="size-4" /> 上一章
         </Button>
@@ -581,14 +613,14 @@ export default function Reader() {
 function FontControls() {
   const { fontSize, setFontSize } = useReaderPrefs()
   return (
-    <div className="flex items-center gap-1 rounded-lg bg-black/5 px-1">
-      <button className="grid size-7 place-items-center rounded-md hover:bg-black/5" title="减小字号" onClick={() => setFontSize(Math.max(14, fontSize - 1))}>
+    <div className="flex items-center gap-1 rounded-lg bg-muted px-1">
+      <button className="grid size-7 place-items-center rounded-md hover:bg-accent" title="减小字号" onClick={() => setFontSize(Math.max(14, fontSize - 1))}>
         <Minus className="size-3.5" />
       </button>
       <span className="flex w-12 items-center justify-center gap-0.5 text-xs" title="字号">
         <Type className="size-3" />{fontSize}
       </span>
-      <button className="grid size-7 place-items-center rounded-md hover:bg-black/5" title="增大字号" onClick={() => setFontSize(Math.min(28, fontSize + 1))}>
+      <button className="grid size-7 place-items-center rounded-md hover:bg-accent" title="增大字号" onClick={() => setFontSize(Math.min(28, fontSize + 1))}>
         <Plus className="size-3.5" />
       </button>
     </div>

@@ -8,6 +8,7 @@ export interface AppSettings {
   ai_model: string
   ai_style: string
   ai_api_key: string
+  proxy_url: string
   storage_quota_gb: number
   reader_font_size: number
   reader_line_height: number
@@ -46,6 +47,8 @@ export const useSettings = create<SettingsState>((set) => ({
 interface ReaderPrefsState {
   fontSize: number
   paper: 'paper' | 'sepia' | 'dark' | 'ink'
+  /** true = 未手动选过纸张，自动跟随应用主题（深色→夜间纸） */
+  paperAuto: boolean
   mode: 'scroll' | 'paged'
   setFontSize: (n: number) => void
   setPaper: (p: ReaderPrefsState['paper']) => void
@@ -57,9 +60,10 @@ export const useReaderPrefs = create<ReaderPrefsState>()(
     (set) => ({
       fontSize: 18,
       paper: 'paper',
+      paperAuto: true,
       mode: 'scroll',
       setFontSize: (fontSize) => set({ fontSize }),
-      setPaper: (paper) => set({ paper }),
+      setPaper: (paper) => set({ paper, paperAuto: false }),
       setMode: (mode) => set({ mode }),
     }),
     { name: 'moread-reader' },

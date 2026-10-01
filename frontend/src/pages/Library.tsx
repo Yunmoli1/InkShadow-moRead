@@ -19,7 +19,7 @@ interface Media {
   created_at?: string
 }
 
-const FILTERS = ['全部', 'image', 'video', 'audio', 'page', 'doc']
+const FILTERS = ['全部', 'image', 'video', 'audio', 'page', 'doc', 'file']
 
 const typeIcon: Record<string, React.ReactNode> = {
   image: <ImageIcon className="size-6" />,
