@@ -16,8 +16,14 @@ backend/data/
 # 外部下载器二进制与源码/压缩包（体积大，按需本地安装）
 tools/bin/
 tools/src/
+tools/ffmpeg/
 tools/*.tar.gz
 tools/*.zip
+
+# Android APK 封装产物与本地构建中间件（体积大，按需本地构建）
+android-apk/*.apk
+android-apk/*.idsig
+android-apk/test/out/
 
 # 会话产物归档（排障探针、测试文件等）
 downloads/
