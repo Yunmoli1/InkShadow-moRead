@@ -146,6 +146,7 @@ class MediaOut(BaseModel):
     file_size: int
     duration: float
     preview_url: str = ""
+    thumbnail_url: str = ""
     extra: dict = {}
     created_at: datetime | None = None
 
@@ -180,6 +181,7 @@ class SettingsOut(BaseModel):
     reader_line_height: float = 1.8
     reader_paper: str = "paper"
     reader_mode: str = "scroll"
+    access_token: str = ""
 
 
 class SettingsIn(BaseModel):
@@ -194,6 +196,7 @@ class SettingsIn(BaseModel):
     reader_line_height: float | None = None
     reader_paper: str | None = None
     reader_mode: str | None = None
+    access_token: str | None = None
 
 
 class PreviewRequest(BaseModel):

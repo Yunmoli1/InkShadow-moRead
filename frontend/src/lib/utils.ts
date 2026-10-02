@@ -26,6 +26,25 @@ export function haptic(ms = 10) {
   }
 }
 
+/** 桌面通知（需用户已授权 Notification 权限） */
+export function notify(title: string, body: string) {
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body, icon: '/pwa-192.png' })
+    }
+  } catch { /* ignore */ }
+}
+
+/** 请求通知权限（须由用户手势触发；已授权/拒绝时静默） */
+export async function requestNotifyPermission(): Promise<boolean> {
+  try {
+    if (!('Notification' in window)) return false
+    if (Notification.permission === 'granted') return true
+    if (Notification.permission === 'denied') return false
+    return (await Notification.requestPermission()) === 'granted'
+  } catch { return false }
+}
+
 export const MEDIA_TYPE_LABEL: Record<string, string> = {
   image: '图片',
   video: '视频',

@@ -385,15 +385,27 @@ def parse_search_output(spec: ToolSpec, text: str) -> list[dict]:
         #   📖 Novel Title  (3 results)
         #     ➡ https://site.com/book
         #       ongoing
+        # 同一本书的多个镜像站点按路径 slug 去重，合并进 mirrors 列表。
         current_title = ""
+        seen: dict[str, dict] = {}
+        ordered: list[dict] = []
         for line in text.splitlines():
             s = line.strip()
             if s.startswith("📖"):
                 current_title = re.sub(r"^\S+\s*", "", s).split("(")[0].strip()
             elif s.startswith("➡"):
                 url = s.lstrip("➡").strip()
-                if url:
-                    results.append({"title": current_title or url, "url": url})
+                if not url:
+                    continue
+                slug = re.sub(r"^https?://[^/]+/", "", url).strip("/").lower()
+                key = slug or url.lower()
+                if key in seen:
+                    seen[key].setdefault("mirrors", []).append(url)
+                else:
+                    item = {"title": current_title or url, "url": url, "mirrors": [url]}
+                    seen[key] = item
+                    ordered.append(item)
+        results = ordered
     return results[:20]
 
 

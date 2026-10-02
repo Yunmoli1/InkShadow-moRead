@@ -14,6 +14,7 @@ export interface AppSettings {
   reader_line_height: number
   reader_paper: string
   reader_mode: string
+  access_token: string
 }
 
 interface SettingsState {

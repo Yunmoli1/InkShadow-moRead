@@ -22,7 +22,9 @@ def _media_out(m: MediaItem) -> MediaOut:
         id=m.id, media_type=m.media_type, title=m.title, source_url=m.source_url,
         file_path=m.file_path, thumbnail_path=m.thumbnail_path, mime_type=m.mime_type,
         file_size=m.file_size, duration=m.duration,
-        preview_url=f"/api/media/{m.id}/file", extra=m.extra or {},
+        preview_url=f"/api/media/{m.id}/file",
+        thumbnail_url=f"/api/media/{m.id}/thumb" if m.thumbnail_path else "",
+        extra=m.extra or {},
         created_at=m.created_at,
     )
 
@@ -92,6 +94,60 @@ async def media_detail(media_id: str) -> MediaOut:
         if m is None:
             raise HTTPException(404, "资源不存在")
         return _media_out(m)
+
+
+@router.get("/{media_id}/thumb")
+async def media_thumb(media_id: str):
+    """缩略图（视频首帧 / 图片压缩版）；无缩略图时 404，前端回退原图。"""
+    from fastapi.responses import FileResponse
+
+    async with SessionLocal() as db:
+        m = await db.get(MediaItem, media_id)
+        if m is None or not m.thumbnail_path:
+            raise HTTPException(404, "无缩略图")
+        path = config.DATA_DIR / m.thumbnail_path
+    if not path.is_file():
+        raise HTTPException(404, "缩略图文件缺失")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.patch("/{media_id}/progress")
+async def media_progress(media_id: str, body: dict) -> dict:
+    """记录/查询音视频播放进度（秒），存于 extra。"""
+    from datetime import datetime, timezone
+
+    position = float(body.get("position", 0))
+    async with SessionLocal() as db:
+        m = await db.get(MediaItem, media_id)
+        if m is None:
+            raise HTTPException(404, "资源不存在")
+        extra = dict(m.extra or {})
+        extra["progress"] = round(position, 1)
+        extra["progress_at"] = datetime.now(timezone.utc).isoformat()
+        m.extra = extra
+        await db.commit()
+    return {"id": media_id, "progress": extra["progress"], "message": "播放进度已保存"}
+
+
+@router.post("/backfill-assets")
+async def backfill_assets() -> dict:
+    """为缺少时长/缩略图的既有资源补建（视频时长+首帧、图片缩略图）。"""
+    import asyncio
+
+    from ..services import media_assets
+
+    async with SessionLocal() as db:
+        items = (await db.execute(select(MediaItem))).scalars().all()
+        updated = 0
+        for m in items:
+            try:
+                if await media_assets.fill_media_assets(db, m):
+                    updated += 1
+            except Exception:
+                continue
+        await db.commit()
+    return {"updated": updated, "message": f"已为 {updated} 个资源补建时长/缩略图"}
 
 
 @router.get("/{media_id}/file")

@@ -1,10 +1,11 @@
 """MoRead backend entrypoint."""
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +42,28 @@ app.include_router(tasks.router)
 app.include_router(novels.router)
 app.include_router(media.router)
 app.include_router(settings.router)
+
+
+# --- 可选访问令牌（局域网访问保护） ----------------------------------------
+# 设置中配置 access_token 后，/api/*（除 health）需要请求头 X-MoRead-Token
+# 或查询参数 ?token= 匹配；未设置则完全开放（纯本机使用不受影响）。
+from .services.token_guard import current_token as _current_token
+
+
+@app.middleware("http")
+async def access_token_guard(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path != "/api/health":
+        token = await _current_token()
+        if token:
+            provided = (
+                request.headers.get("x-moread-token")
+                or request.query_params.get("token")
+                or ""
+            )
+            if provided != token:
+                return JSONResponse({"detail": "需要访问令牌"}, status_code=401)
+    return await call_next(request)
 
 
 @app.get("/api/health", tags=["meta"])

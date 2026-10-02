@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Database, Download, Globe, HardDrive, KeyRound, Lock, Server, Trash2, Upload } from 'lucide-react'
+import { Database, Download, Globe, HardDrive, KeyRound, Lock, Server, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,6 +10,7 @@ import { api } from '@/lib/api'
 import { useSettings, type AppSettings } from '@/stores/settings'
 import { useTheme } from '@/stores/theme'
 import { useToast } from '@/components/Toast'
+import { setToken, getToken } from '@/lib/api'
 import { formatBytes, haptic } from '@/lib/utils'
 
 interface StorageStats {
@@ -30,7 +31,19 @@ export default function SettingsPage() {
   const [needPwd, setNeedPwd] = useState<null | 'export' | 'import'>(null)
   const [pendingFile, setPendingFile] = useState<File | null>(null)
   const importRef = useRef<HTMLInputElement>(null)
+  const [tokenDraft, setTokenDraft] = useState('')
   const { toast } = useToast()
+
+  // 载入已有令牌到草稿
+  useEffect(() => {
+    if (settings && tokenDraft === '') setTokenDraft(settings.access_token ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.access_token])
+
+  function genToken(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(9))
+    return btoa(String.fromCharCode(...bytes)).replace(/[+/=]/g, '').slice(0, 12)
+  }
 
   useEffect(() => {
     if (!settings) load()
@@ -109,6 +122,46 @@ export default function SettingsPage() {
               {theme === 'light' ? '切换到深色' : '切换到浅色'}
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* 访问令牌 */}
+      <Card className="rounded-xl">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="size-4 text-primary" /> 访问令牌（局域网保护）</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            手机/APK 通过局域网访问本机书库时，可设置访问令牌防止同网设备未授权读写。设置后所有 API
+            请求需携带令牌；纯本机（127.0.0.1 浏览器使用）不受影响。留空表示关闭保护。
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+              placeholder="留空 = 关闭保护"
+              className="h-9 w-64 font-mono text-xs"
+            />
+            <Button variant="outline" size="sm" onClick={() => setTokenDraft(genToken())}>
+              随机生成
+            </Button>
+            <Button size="sm" onClick={async () => {
+              try {
+                await patch({ access_token: tokenDraft.trim() })
+                setToken(tokenDraft.trim())
+                toast('success', tokenDraft.trim() ? '访问令牌已启用' : '访问令牌已关闭')
+              } catch (err) {
+                toast('error', err instanceof Error ? err.message : '保存失败')
+              }
+            }}>
+              保存并启用
+            </Button>
+          </div>
+          {tokenDraft.trim() && (
+            <p className="break-all rounded-lg bg-muted p-2 font-mono text-[11px] text-muted-foreground">
+              移动端地址：http://&lt;本机IP&gt;:8686/?token={tokenDraft.trim()}
+            </p>
+          )}
         </CardContent>
       </Card>
 

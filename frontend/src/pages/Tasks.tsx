@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Badge, Skeleton } from '@/components/ui/misc'
 import { api, subscribeTask, type TaskSseEvent } from '@/lib/api'
 import { useToast } from '@/components/Toast'
-import { cn } from '@/lib/utils'
+import { cn, notify } from '@/lib/utils'
 
 interface Task {
   id: string
@@ -71,13 +71,15 @@ export default function Tasks() {
       unsubs.current.forEach((u) => u())
       unsubs.current = []
       try {
-        const running = await api.get<{ id: string }[]>('/api/tools/running')
+        const running = await api.get<{ id: string; title?: string }[]>('/api/tools/running')
         for (const r of running) {
           const unsub = subscribeTask(r.id, {
             onProgress: (ev: TaskSseEvent) => {
               setTasks((ts) => ts.map((t) => (t.id === ev.task_id ? { ...t, ...ev } as Task : t)))
             },
-            onEnd: () => {
+            onEnd: (status) => {
+              if (status === 'completed') notify('墨读 · 任务完成', r.title || '下载已完成')
+              else if (status === 'failed') notify('墨读 · 任务失败', r.title || '请查看任务详情')
               window.dispatchEvent(new Event('moread-sse-up'))
               load()
               timer = window.setTimeout(connectRunning, 500)

@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   BookOpen, CloudDownload, LayoutGrid, ListChecks, Settings as SettingsIcon,
-  BarChart3, Wrench, Search, Moon, Sun, Menu, X, Radio,
+  BarChart3, Wrench, Search, Moon, Sun, Menu, X, Radio, ShieldCheck,
 } from 'lucide-react'
 import { useTheme } from '@/stores/theme'
 import { cn, haptic } from '@/lib/utils'
 import { CommandPalette } from '@/components/CommandPalette'
+import { getToken, setToken } from '@/lib/api'
 
 const NAV = [
   { to: '/grab', label: '万能抓取', icon: CloudDownload },
@@ -24,6 +25,8 @@ export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [sseDown, setSseDown] = useState(false)
+  const [needToken, setNeedToken] = useState(false)
+  const [tokenInput, setTokenInput] = useState('')
   const navigate = useNavigate()
 
   // Ctrl+K 全局搜索
@@ -36,6 +39,14 @@ export function AppShell() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // 访问令牌：后端启用令牌后，任意 API 返回 401 时弹出输入框
+  useEffect(() => {
+    setTokenInput(getToken())
+    const onNeed = () => setNeedToken(true)
+    window.addEventListener('moread-auth-required', onNeed)
+    return () => window.removeEventListener('moread-auth-required', onNeed)
   }, [])
 
   // 全局网络/SSE 状态指示（通过事件总线感知断线重连）
@@ -146,6 +157,44 @@ export function AppShell() {
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+
+      {needToken && (
+        <div className="fixed inset-0 z-[110] grid place-items-center bg-black/50 backdrop-blur-sm">
+          <div className="w-[22rem] rounded-2xl border border-border bg-card p-6 shadow-xl">
+            <h2 className="flex items-center gap-2 text-base font-semibold">
+              <ShieldCheck className="size-4 text-primary" /> 需要访问令牌
+            </h2>
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+              此服务已启用局域网访问保护，请输入设置页生成的访问令牌。
+            </p>
+            <input
+              autoFocus
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && tokenInput.trim()) {
+                  setToken(tokenInput.trim())
+                  setNeedToken(false)
+                  window.location.reload()
+                }
+              }}
+              placeholder="访问令牌"
+              className="mt-4 h-10 w-full rounded-lg border border-input bg-background px-3 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+            />
+            <button
+              className="mt-3 h-9 w-full rounded-lg bg-primary text-sm text-primary-foreground hover:opacity-90"
+              onClick={() => {
+                if (!tokenInput.trim()) return
+                setToken(tokenInput.trim())
+                setNeedToken(false)
+                window.location.reload()
+              }}
+            >
+              保存并刷新
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

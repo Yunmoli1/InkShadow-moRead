@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { FixedSizeList } from 'react-window'
 import {
   AlignLeft, ArrowLeft, BookOpen, ChevronLeft, ChevronRight, Eraser, List,
-  Minus, Moon, NotebookPen, Plus, RotateCcw, Save, Sparkles, Sun, Type, Volume2, X,
+  Minus, Moon, NotebookPen, Plus, RotateCcw, Save, Search, Sparkles, Sun, Type, Volume2, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/controls'
@@ -16,11 +16,12 @@ import { cn, haptic } from '@/lib/utils'
 import { useReaderPrefs } from '@/stores/settings'
 import { useTheme } from '@/stores/theme'
 
-interface Novel { id: string; title: string; author: string; total_chapters: number; last_chapter_idx: number }
+interface Novel { id: string; title: string; author: string; total_chapters: number; last_chapter_idx: number; last_scroll_pos: number }
 interface ChapterItem { id: string; idx: number; title: string; word_count: number }
 interface ChapterContent extends ChapterItem { content: string; novel_id: string }
 interface Note { id: string; chapter_idx: number; chapter_title: string; excerpt: string; content: string; created_at?: string }
 interface AiSum { summary: string; model: string; cached: boolean }
+interface SearchResultGroup { chapter_id: string; chapter_idx: number; title: string; hits: { where: string; snippet: string }[] }
 
 const PAPERS = [
   { key: 'paper', label: '纸白' },
@@ -55,6 +56,14 @@ export default function Reader() {
   const [ttsPitch, setTtsPitch] = useState(1)
   const [pageNum, setPageNum] = useState(0)
 
+  // 目录 / 书内搜索
+  const [tocTab, setTocTab] = useState<'toc' | 'search'>('toc')
+  const [tocFilter, setTocFilter] = useState('')
+  const [searchQ, setSearchQ] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [searchResults, setSearchResults] = useState<SearchResultGroup[] | null>(null)
+  const [highlightTerm, setHighlightTerm] = useState('')
+
   // 章节虚拟列表分页加载（1000+ 章节流畅滚动）
   const [allChapters, setAllChapters] = useState<ChapterItem[]>([])
   const listRef = useRef<FixedSizeList>(null)
@@ -62,11 +71,14 @@ export default function Reader() {
   const lastDeleted = useRef<Note | null>(null)
   const idleTimer = useRef<number>()
   const sessionStart = useRef(Date.now())
+  const pokeIdleRef = useRef<(() => void) | null>(null)
 
   // ---- load novel + first batch of chapters, then content ----
   useEffect(() => {
     if (!novelId) return
     let cancelled = false
+    restoredRef.current = false
+    scrollRatioRef.current = 0
     api.get<Novel>(`/api/novels/${novelId}`).then(async (n) => {
       if (cancelled) return
       setNovel(n)
@@ -107,6 +119,30 @@ export default function Reader() {
     }
   }, [novelId])
 
+  // ---- 目录筛选（已加载章节内按标题过滤） ----
+  const tocRows = useMemo(() => {
+    const rows = allChapters.map((c, idx) => ({ c, idx })).filter((r) => r.c)
+    const q = tocFilter.trim().toLowerCase()
+    if (!q) return rows
+    return rows.filter((r) => r.c.title.toLowerCase().includes(q))
+  }, [allChapters, tocFilter])
+
+  // ---- 书内全文搜索 ----
+  const runInBookSearch = useCallback(async () => {
+    if (!novelId || !searchQ.trim()) return
+    setSearching(true)
+    try {
+      const data = await api.get<{ results: SearchResultGroup[] }>(
+        `/api/novels/${novelId}/search`, { q: searchQ.trim() },
+      )
+      setSearchResults(data.results)
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '搜索失败')
+    } finally {
+      setSearching(false)
+    }
+  }, [novelId, searchQ])
+
   // ---- load chapter content ----
   useEffect(() => {
     if (!novelId || !ready || allChapters.length === 0) return
@@ -125,12 +161,24 @@ export default function Reader() {
   }, [novelId, chapterIdx, ready, allChapters.length])
 
   // ---- reading session heartbeat (30s) + progress on chapter switch ----
+  const scrollRatioRef = useRef(0)
+  const restoredRef = useRef(false)
+
+  const onContentScroll = useCallback(() => {
+    pokeIdleRef.current?.()
+    const el = contentRef.current
+    if (!el || el.scrollHeight <= el.clientHeight) return
+    scrollRatioRef.current = el.scrollTop / (el.scrollHeight - el.clientHeight)
+  }, [])
+
   const saveProgress = useCallback((duration: number) => {
     if (!novelId) return
     api.patch(`/api/novels/${novelId}/progress`, {
-      chapter_idx: chapterIdx, scroll_pos: 0, duration_sec: duration, chapters_read: 0,
+      chapter_idx: chapterIdx,
+      scroll_pos: prefs.mode === 'scroll' ? scrollRatioRef.current : 0,
+      duration_sec: duration, chapters_read: 0,
     }).catch(() => {})
-  }, [novelId, chapterIdx])
+  }, [novelId, chapterIdx, prefs.mode])
 
   useEffect(() => {
     sessionStart.current = Date.now()
@@ -154,8 +202,21 @@ export default function Reader() {
   }, [])
   useEffect(() => {
     pokeIdle()
+    pokeIdleRef.current = pokeIdle
     return () => window.clearTimeout(idleTimer.current)
   }, [pokeIdle])
+
+  // ---- 恢复上次阅读位置（仅打开书时的保存章节，且滚动模式） ----
+  useEffect(() => {
+    if (!chapter || !novel || prefs.mode !== 'scroll' || restoredRef.current) return
+    if (chapterIdx !== novel.last_chapter_idx || novel.last_scroll_pos <= 0) return
+    restoredRef.current = true
+    const el = contentRef.current
+    if (!el) return
+    const target = novel.last_scroll_pos * (el.scrollHeight - el.clientHeight)
+    const t = window.setTimeout(() => { el.scrollTop = target }, 150)
+    return () => window.clearTimeout(t)
+  }, [chapter, novel, chapterIdx, prefs.mode])
 
   // ---- keyboard shortcuts ----
   const goChapter = useCallback((idx: number) => {
@@ -285,14 +346,48 @@ export default function Reader() {
     }).catch(() => toast('error', '导出失败'))
   }
 
-  // ---- AI summary ----
+  // ---- AI summary（流式打字机效果） ----
   const askAi = async () => {
     if (!chapter || !novelId) return
     setPanel('ai')
     setAiLoading(true)
+    setAi({ summary: '', model: '', cached: false })
     try {
-      const res = await api.post<AiSum>(`/api/novels/${novelId}/ai-summary`, { chapter_id: chapter.id })
-      setAi(res)
+      const resp = await fetch(`/api/novels/${novelId}/ai-summary/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapter_id: chapter.id }),
+      })
+      if (!resp.ok || !resp.body) {
+        const d = await resp.json().catch(() => null)
+        throw new Error(typeof d?.detail === 'string' ? d.detail : `HTTP ${resp.status}`)
+      }
+      const reader = resp.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const frames = buf.split('\n\n')
+        buf = frames.pop() ?? ''
+        for (const frame of frames) {
+          const ev = frame.split('\n').find((l) => l.startsWith('event:'))?.slice(6).trim()
+          const dataLine = frame.split('\n').find((l) => l.startsWith('data:'))?.slice(5).trim()
+          if (!ev || !dataLine) continue
+          let payload: { text?: string; summary?: string; cached?: boolean; message?: string }
+          try { payload = JSON.parse(dataLine) } catch { continue }
+          if (ev === 'delta') {
+            setAi((a) => ({ summary: (a?.summary ?? '') + (payload.text ?? ''), model: '', cached: false }))
+          } else if (ev === 'error') {
+            toast('error', payload.message ?? 'AI 摘要失败')
+            setPanel('none')
+            return
+          } else if (ev === 'end') {
+            setAi({ summary: payload.summary ?? '', model: '', cached: !!payload.cached })
+          }
+        }
+      }
     } catch (err) {
       toast('error', err instanceof Error ? err.message : 'AI 摘要失败')
       setPanel('none')
@@ -390,55 +485,121 @@ export default function Reader() {
       )}
 
       <div className="flex min-h-0 flex-1 pt-14">
-        {/* 目录侧栏（react-window 虚拟滚动）— 跟随应用主题 */}
+        {/* 目录 / 书内搜索侧栏（react-window 虚拟滚动）— 跟随应用主题 */}
         {showToc && (
           <aside className="fixed inset-y-14 left-0 z-30 flex w-72 flex-col border-r border-border bg-card/95 text-card-foreground backdrop-blur md:static md:h-full md:shrink-0">
-            <div className="flex items-center justify-between border-b border-border p-3">
-              <span className="text-sm font-medium">目录 · 共 {total} 章</span>
+            <div className="flex items-center gap-1 border-b border-border p-2">
+              <button
+                onClick={() => setTocTab('toc')}
+                className={cn('h-8 flex-1 rounded-lg text-sm transition-colors', tocTab === 'toc' ? 'bg-primary/15 font-medium text-primary' : 'hover:bg-accent')}
+              >
+                目录 · {total}
+              </button>
+              <button
+                onClick={() => setTocTab('search')}
+                className={cn('h-8 flex-1 rounded-lg text-sm transition-colors', tocTab === 'search' ? 'bg-primary/15 font-medium text-primary' : 'hover:bg-accent')}
+              >
+                全文搜索
+              </button>
               <Button variant="ghost" size="iconSm" className="md:hidden" onClick={() => setShowToc(false)}>
                 <X className="size-4" />
               </Button>
             </div>
-            <div className="flex-1">
-              <FixedSizeList
-                ref={listRef}
-                height={typeof window !== 'undefined' ? window.innerHeight - 112 : 600}
-                width={288}
-                itemCount={total}
-                itemSize={44}
-                overscanCount={8}
-                onItemsRendered={({ visibleStartIndex }) => {
-                  // 惰性加载：接近已加载边界时循环补齐到可见位置
-                  if (allChapters.length < total && visibleStartIndex > allChapters.length - 100) {
-                    ensureChapters(visibleStartIndex + 20)
-                  }
-                }}
-              >
-                {({ index, style }) => {
-                  const c = allChapters[index]
-                  if (!c) return <div style={style} className="skeleton-shimmer mx-3 my-1.5 h-8 rounded-md" />
-                  return (
-                    <button
-                      key={c.id}
-                      style={style}
-                      className={cn(
-                        'mx-2 flex w-[calc(100%-1rem)] items-center gap-2 rounded-lg px-3 text-left text-sm transition-colors',
-                        index === chapterIdx ? 'bg-primary/15 font-medium text-primary' : 'hover:bg-accent',
-                      )}
-                      onClick={() => { goChapter(index); if (window.innerWidth < 768) setShowToc(false) }}
-                    >
-                      <span className="w-12 shrink-0 text-right text-[10px] opacity-50">{index + 1}</span>
-                      <span className="truncate">{c.title}</span>
-                    </button>
-                  )
-                }}
-              </FixedSizeList>
-            </div>
+
+            {tocTab === 'toc' ? (
+              <>
+                <div className="border-b border-border p-2">
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 opacity-50" />
+                    <input
+                      value={tocFilter}
+                      onChange={(e) => setTocFilter(e.target.value)}
+                      placeholder="筛选章节标题…"
+                      className="h-8 w-full rounded-md border border-input bg-background pl-8 pr-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                </div>
+                <div className="flex-1">
+                  <FixedSizeList
+                    ref={listRef}
+                    height={typeof window !== 'undefined' ? window.innerHeight - 150 : 600}
+                    width={288}
+                    itemCount={tocRows.length}
+                    itemSize={44}
+                    overscanCount={8}
+                    onItemsRendered={({ visibleStartIndex }) => {
+                      // 惰性加载：接近已加载边界时循环补齐到可见位置
+                      if (!tocFilter && allChapters.length < total && visibleStartIndex > allChapters.length - 100) {
+                        ensureChapters(visibleStartIndex + 20)
+                      }
+                    }}
+                  >
+                    {({ index, style }) => {
+                      const row = tocRows[index]
+                      if (!row?.c) return <div style={style} className="skeleton-shimmer mx-3 my-1.5 h-8 rounded-md" />
+                      const { c, idx } = row
+                      return (
+                        <button
+                          key={c.id}
+                          style={style}
+                          className={cn(
+                            'mx-2 flex w-[calc(100%-1rem)] items-center gap-2 rounded-lg px-3 text-left text-sm transition-colors',
+                            idx === chapterIdx ? 'bg-primary/15 font-medium text-primary' : 'hover:bg-accent',
+                          )}
+                          onClick={() => { goChapter(idx); setHighlightTerm(''); if (window.innerWidth < 768) setShowToc(false) }}
+                        >
+                          <span className="w-12 shrink-0 text-right text-[10px] opacity-50">{idx + 1}</span>
+                          <span className="truncate">{c.title}</span>
+                        </button>
+                      )
+                    }}
+                  </FixedSizeList>
+                </div>
+              </>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="border-b border-border p-2">
+                  <div className="flex gap-1.5">
+                    <input
+                      value={searchQ}
+                      onChange={(e) => setSearchQ(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && runInBookSearch()}
+                      placeholder="搜索全书正文…"
+                      className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+                    />
+                    <Button size="sm" variant="secondary" onClick={runInBookSearch} disabled={searching || !searchQ.trim()}>
+                      {searching ? '…' : '搜索'}
+                    </Button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto p-2">
+                  {searchResults === null ? (
+                    <p className="p-3 text-xs leading-relaxed opacity-50">输入关键词在全书内搜索（含标题与正文），点击结果跳转章节并高亮。</p>
+                  ) : searchResults.length === 0 ? (
+                    <p className="p-3 text-xs opacity-50">无匹配结果</p>
+                  ) : (
+                    searchResults.map((g) => (
+                      <div key={g.chapter_id} className="mb-2">
+                        <button
+                          onClick={() => { goChapter(g.chapter_idx); setHighlightTerm(searchQ.trim()); if (window.innerWidth < 768) setShowToc(false) }}
+                          className="w-full rounded-md px-2 py-1.5 text-left text-xs font-medium hover:bg-accent"
+                        >
+                          {g.chapter_idx + 1} · {g.title}
+                        </button>
+                        {g.hits.filter((h) => h.where === 'content').map((h, i) => (
+                          <p key={i} className="mx-2 mb-1 rounded-md bg-muted px-2 py-1 text-[11px] leading-relaxed opacity-80">{h.snippet}</p>
+                        ))}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
           </aside>
         )}
 
         {/* 正文 */}
-        <div ref={contentRef} onScroll={pokeIdle} className="relative min-w-0 flex-1 overflow-y-auto px-4 pb-24 pt-8 md:px-8">
+        <div ref={contentRef} onScroll={onContentScroll} className="relative min-w-0 flex-1 overflow-y-auto px-4 pb-24 pt-8 md:px-8">
           {loadingChapter || !chapter ? (
             <div className="mx-auto max-w-[860px] space-y-4">
               {Array.from({ length: 8 }).map((_, i) => (
@@ -469,7 +630,7 @@ export default function Reader() {
                     />
                   )
                 }
-                return <p key={i}>{p}</p>
+                return <p key={i}><Highlight text={p} term={highlightTerm} /></p>
               })}
               <NavBottom />
             </motion.article>
@@ -625,4 +786,30 @@ function FontControls() {
       </button>
     </div>
   )
+}
+
+/** 书内搜索跳转后的关键词高亮 */
+function Highlight({ text, term }: { text: string; term: string }) {
+  const q = term.trim()
+  if (!q) return <>{text}</>
+  const parts: React.ReactNode[] = []
+  const lower = text.toLowerCase()
+  const tl = q.toLowerCase()
+  let from = 0
+  let key = 0
+  for (;;) {
+    const at = lower.indexOf(tl, from)
+    if (at < 0) {
+      parts.push(text.slice(from))
+      break
+    }
+    if (at > from) parts.push(text.slice(from, at))
+    parts.push(
+      <mark key={key++} className="rounded bg-primary/25 px-0.5 text-inherit">
+        {text.slice(at, at + q.length)}
+      </mark>,
+    )
+    from = at + q.length
+  }
+  return <>{parts}</>
 }

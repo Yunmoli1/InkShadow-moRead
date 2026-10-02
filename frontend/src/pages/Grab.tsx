@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/misc'
 import { api, subscribeTask, type TaskSseEvent } from '@/lib/api'
 import { useToast } from '@/components/Toast'
-import { cn } from '@/lib/utils'
+import { cn, notify, requestNotifyPermission } from '@/lib/utils'
 
 interface ToolInfo {
   name: string
@@ -54,6 +54,10 @@ export default function Grab() {
   const [selected, setSelected] = useState<string[]>([])
   const [taskId, setTaskId] = useState<string | null>(null)
   const [progress, setProgress] = useState<TaskSseEvent | null>(null)
+  const [searchQ, setSearchQ] = useState('')
+  const [searchTool, setSearchTool] = useState('lncrawl')
+  const [searching, setSearching] = useState(false)
+  const [bookResults, setBookResults] = useState<{ title: string; url: string; mirrors?: string[] }[] | null>(null)
   const navigate = useNavigate()
   const { toast } = useToast()
   const unsubs = useRef<(() => void)[]>([])
@@ -66,6 +70,54 @@ export default function Grab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const runSearch = async () => {
+    if (!searchQ.trim()) {
+      toast('error', '请输入搜索关键词')
+      return
+    }
+    setSearching(true)
+    setBookResults(null)
+    try {
+      const res = await api.post<{ results: { title: string; url: string; mirrors?: string[] }[]; message?: string }>(
+        `/api/tools/${searchTool}/search`, { query: searchQ.trim(), limit: 10 },
+      )
+      setBookResults(res.results)
+      if (!res.results.length) toast('info', res.message || '无搜索结果')
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '搜索失败')
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const grabSearched = async (u: string) => {
+    setUrl(u)
+    try {
+      const created = await api.post<{ task_id: string; message: string }>(
+        '/api/tools/auto/download', { url: u, content_type: 'novel' },
+      )
+      setTaskId(created.task_id)
+      toast('success', created.message)
+      const unsub = subscribeTask(created.task_id, {
+        onProgress: (ev) => setProgress(ev),
+        onEnd: (status) => {
+          setProgress((p) => ({ ...(p ?? { task_id: created.task_id }), status, progress: 100 }))
+          if (status === 'completed') {
+            toast('success', '小说下载完成！已加入书架')
+            notify('墨读 · 小说下载完成', '已加入书架')
+          } else if (status === 'failed') {
+            toast('error', '下载失败，请查看任务中心')
+            notify('墨读 · 下载失败', '请到任务中心查看详情')
+          }
+        },
+        onReconnecting: () => window.dispatchEvent(new Event('moread-sse-down')),
+      })
+      unsubs.current.push(unsub)
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '创建任务失败')
+    }
+  }
+
   const submit = async () => {
     if (!url.trim()) {
       toast('error', '请输入要抓取的 URL')
@@ -73,6 +125,7 @@ export default function Grab() {
     }
     setSubmitting(true)
     setProgress(null)
+    void requestNotifyPermission()  // 首次抓取时请求桌面通知权限
     try {
       const created = await api.post<{ task_id: string; tool: string; message: string }>(
         '/api/tools/auto/download',
@@ -86,9 +139,11 @@ export default function Grab() {
           setProgress((p) => ({ ...(p ?? { task_id: created.task_id }), status, progress: 100 }))
           if (status === 'completed') {
             toast('success', '抓取完成！已加入资源库')
+            notify('墨读 · 抓取完成', '内容已加入资源库')
             setTimeout(() => navigate('/library'), 1200)
           } else if (status === 'failed') {
             toast('error', '抓取失败，请查看任务中心了解详情')
+            notify('墨读 · 抓取失败', '请到任务中心查看详情')
           }
         },
         onReconnecting: () => window.dispatchEvent(new Event('moread-sse-down')),
@@ -336,6 +391,66 @@ export default function Grab() {
           ))}
         </div>
       </div>
+
+      {/* 小说/视频搜索（调度 lncrawl / yt-dlp） */}
+      <Card className="rounded-xl shadow-md">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Search className="size-4 text-primary" /> 按关键词搜索
+          </CardTitle>
+          <CardDescription>调度 lncrawl 搜小说（同书多镜像已合并）、yt-dlp 搜视频，点击结果直接抓取</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Select value={searchTool} onValueChange={setSearchTool}>
+              <SelectTrigger className="h-10 w-full sm:w-40">
+                {searchTool === 'lncrawl' ? 'Lightnovel Crawler' : 'yt-dlp'}
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="lncrawl">小说（lncrawl）</SelectItem>
+                <SelectItem value="yt-dlp">视频（yt-dlp）</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+              placeholder={searchTool === 'lncrawl' ? '输入书名关键词…' : '输入视频关键词…'}
+              className="h-10 flex-1"
+            />
+            <Button onClick={runSearch} disabled={searching || !searchQ.trim()} className="h-10">
+              <Search className="size-4" /> {searching ? '搜索中…' : '搜索'}
+            </Button>
+          </div>
+
+          {bookResults && bookResults.length > 0 && (
+            <div className="mt-4 max-h-96 space-y-2 overflow-auto">
+              {bookResults.map((r) => (
+                <div
+                  key={r.url}
+                  className="flex items-center gap-3 rounded-lg border border-border p-3 transition-colors hover:bg-accent"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{r.title}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {r.url}
+                      {(r.mirrors?.length ?? 0) > 1 && (
+                        <span className="ml-1 text-primary">（{r.mirrors!.length} 个镜像站点）</span>
+                      )}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" className="shrink-0" onClick={() => grabSearched(r.url)}>
+                    <Download className="size-3.5" /> 抓取
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+          {bookResults && bookResults.length === 0 && (
+            <p className="mt-4 text-center text-sm text-muted-foreground">无搜索结果</p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

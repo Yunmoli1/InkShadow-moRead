@@ -749,14 +749,23 @@ class TaskManager:
                 )
                 if exists:
                     continue
-                db.add(MediaItem(
+                item = MediaItem(
                     media_type=mtype, title=f.stem, source_url=url,
                     file_path=rel, mime_type=_guess_mime(f), file_size=size,
                     extra={"task_id": task_id, "dir": base.name},
-                ))
+                )
+                db.add(item)
                 imported += 1
                 if mtype == "page":
                     page_imported += 1
+                # 视频/图片：补时长与缩略图（后台线程执行，不阻塞事件循环）
+                if mtype in ("video", "image"):
+                    try:
+                        await db.flush()
+                        from .media_assets import fill_media_assets
+                        await fill_media_assets(db, item)
+                    except Exception:
+                        pass
             await db.commit()
         # 只有网页外壳而没有目标内容：对非网页归档任务按失败处理（继续回退）
         if imported == 0 and spec.category != "page":

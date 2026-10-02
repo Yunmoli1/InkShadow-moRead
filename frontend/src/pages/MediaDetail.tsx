@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, ExternalLink, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/misc'
-import { api } from '@/lib/api'
+import { api, withToken } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { formatBytes, haptic, MEDIA_TYPE_LABEL } from '@/lib/utils'
 
@@ -15,6 +15,7 @@ interface Media {
   file_size: number
   mime_type: string
   preview_url: string
+  extra: { progress?: number }
   created_at?: string
 }
 
@@ -31,6 +32,24 @@ export default function MediaDetail() {
   const [error, setError] = useState('')
   const navigate = useNavigate()
   const { toast } = useToast()
+
+  const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null)
+  const lastSaveRef = useRef(0)
+
+  // 播放进度：元数据就绪后续播，timeUpdate 节流保存
+  const onLoadedMetadata = () => {
+    const saved = media?.extra?.progress ?? 0
+    const el = mediaRef.current
+    if (el && saved > 10 && el.duration && saved < el.duration - 15) el.currentTime = saved
+  }
+  const onTimeUpdate = () => {
+    const el = mediaRef.current
+    if (!el || !el.currentTime) return
+    const now = Date.now()
+    if (now - lastSaveRef.current < 5000) return
+    lastSaveRef.current = now
+    api.patch(`/api/media/${mediaId}/progress`, { position: el.currentTime }).catch(() => {})
+  }
 
   useEffect(() => {
     if (!mediaId) return
@@ -93,21 +112,35 @@ export default function MediaDetail() {
       {/* 预览区 */}
       <div className="overflow-hidden rounded-xl border border-border bg-black/90 shadow-md">
         {media.media_type === 'video' && (
-          <video src={media.preview_url} controls className="max-h-[70vh] w-full" />
+          <video
+            ref={mediaRef as React.RefObject<HTMLVideoElement>}
+            src={withToken(media.preview_url)}
+            controls
+            onLoadedMetadata={onLoadedMetadata}
+            onTimeUpdate={onTimeUpdate}
+            className="max-h-[70vh] w-full"
+          />
         )}
         {media.media_type === 'audio' && (
           <div className="flex flex-col items-center gap-6 p-10">
             <div className="grid size-24 place-items-center rounded-full bg-primary/10 text-primary">
               ♪
             </div>
-            <audio src={media.preview_url} controls className="w-full max-w-md" />
+            <audio
+              ref={mediaRef as React.RefObject<HTMLAudioElement>}
+              src={withToken(media.preview_url)}
+              controls
+              onLoadedMetadata={onLoadedMetadata}
+              onTimeUpdate={onTimeUpdate}
+              className="w-full max-w-md"
+            />
           </div>
         )}
         {media.media_type === 'image' && (
-          <img src={media.preview_url} alt={media.title} className="mx-auto max-h-[70vh] object-contain" />
+          <img src={withToken(media.preview_url)} alt={media.title} className="mx-auto max-h-[70vh] object-contain" />
         )}
         {media.media_type === 'page' && (
-          <iframe src={media.preview_url} title={media.title} className="h-[70vh] w-full bg-white" sandbox="" />
+          <iframe src={withToken(media.preview_url)} title={media.title} className="h-[70vh] w-full bg-white" sandbox="" />
         )}
         {media.media_type === 'doc' && (
           <div className="flex h-[70vh] items-center justify-center">

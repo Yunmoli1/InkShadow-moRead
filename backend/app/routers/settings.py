@@ -27,6 +27,7 @@ DEFAULTS = {
     "reader_line_height": 1.8,
     "reader_paper": "paper",
     "reader_mode": "scroll",
+    "access_token": "",
 }
 
 
@@ -55,6 +56,9 @@ async def update_settings(body: SettingsIn) -> SettingsOut:
                 row.value = value
             else:
                 db.add(Setting(key=key, value=value))
+        if "access_token" in updates:
+            from ..services.token_guard import invalidate
+            invalidate()
         await db.commit()
         data = await _load_settings(db)
     return SettingsOut(**{k: data.get(k, v) for k, v in DEFAULTS.items()})
@@ -81,29 +85,63 @@ async def storage_cleanup(older_than_days: int = 30) -> dict:
 
 @router.get("/backup/export")
 async def backup_export() -> FileResponse:
+    """v2 完整备份：正文（含大书的磁盘文件内容）、封面、EPUB 图片全部内联。"""
+    import base64
+
     async with SessionLocal() as db:
         novels = (await db.execute(select(Novel))).scalars().all()
         chapters = (await db.execute(select(Chapter))).scalars().all()
         notes = (await db.execute(select(Note))).scalars().all()
         settings_rows = (await db.execute(select(Setting))).scalars().all()
         media = (await db.execute(select(MediaItem))).scalars().all()
+
+        def _read_rel(rel: str) -> bytes | None:
+            if not rel:
+                return None
+            p = config.DATA_DIR / rel
+            try:
+                return p.read_bytes()
+            except OSError:
+                return None
+
+        novel_payload = []
+        for n in novels:
+            ch_payload = []
+            for c in chapters:
+                if c.novel_id != n.id:
+                    continue
+                content = c.content
+                if not content and c.content_path:
+                    raw = _read_rel(c.content_path)
+                    if raw is not None:
+                        text = raw.decode("utf-8", errors="replace")
+                        # 磁盘文件格式为 "标题\n\n正文"，去掉首行标题
+                        content = text.split("\n", 1)[1].strip() if "\n" in text else text
+                ch_payload.append({"idx": c.idx, "title": c.title, "content": content})
+            images_b64: dict[str, str] = {}
+            img_dir = config.COVERS_DIR / n.id / "images"
+            if img_dir.exists():
+                for f in sorted(img_dir.iterdir()):
+                    if f.is_file():
+                        images_b64[f.name] = base64.b64encode(f.read_bytes()).decode()
+            cover_b64 = ""
+            cover_raw = _read_rel(n.cover_path)
+            if cover_raw:
+                cover_b64 = base64.b64encode(cover_raw).decode()
+            novel_payload.append({
+                "title": n.title, "author": n.author,
+                "source_url": n.source_url, "description": n.description,
+                "file_type": n.file_type, "category": n.category,
+                "total_chapters": n.total_chapters, "read_chapters": n.read_chapters,
+                "last_chapter_idx": n.last_chapter_idx, "last_scroll_pos": n.last_scroll_pos,
+                "chapters": ch_payload,
+                "cover_jpeg_b64": cover_b64,
+                "images_b64": images_b64,
+            })
         payload = {
-            "app": "MoRead", "version": 1,
+            "app": "MoRead", "version": 2,
             "exported_at": datetime.now(timezone.utc).isoformat(),
-            "novels": [
-                {
-                    "id": n.id, "title": n.title, "author": n.author,
-                    "source_url": n.source_url, "description": n.description,
-                    "file_type": n.file_type, "category": n.category,
-                    "total_chapters": n.total_chapters, "read_chapters": n.read_chapters,
-                    "last_chapter_idx": n.last_chapter_idx, "last_scroll_pos": n.last_scroll_pos,
-                    "chapters": [
-                        {"idx": c.idx, "title": c.title, "content": c.content}
-                        for c in chapters if c.novel_id == n.id
-                    ],
-                }
-                for n in novels
-            ],
+            "novels": novel_payload,
             "notes": [
                 {"novel_id": t.novel_id, "chapter_id": t.chapter_id, "chapter_title": t.chapter_title,
                  "chapter_idx": t.chapter_idx, "excerpt": t.excerpt, "content": t.content}
@@ -117,13 +155,16 @@ async def backup_export() -> FileResponse:
             "settings": {s.key: s.value for s in settings_rows},
         }
     out = config.BACKUPS_DIR / f"moread-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return FileResponse(out, media_type="application/json", filename=out.name)
 
 
 @router.post("/backup/import")
 async def backup_import(request_bytes: dict) -> dict:
-    """Accept decrypted backup JSON: {"app":"MoRead", "novels":[...], "notes":[...]}."""
+    """Accept decrypted backup JSON. v2 完整格式与 v1 旧格式均可。"""
+    import base64
+    import uuid as _uuid
+
     if request_bytes.get("app") != "MoRead":
         raise HTTPException(400, "不是有效的墨读备份文件")
     restored_novels = restored_notes = 0
@@ -141,11 +182,43 @@ async def backup_import(request_bytes: dict) -> dict:
             )
             db.add(novel)
             await db.flush()
-            for c in n.get("chapters", []):
-                db.add(Chapter(novel_id=novel.id, idx=c.get("idx", 0),
-                               title=c.get("title", ""), content=c.get("content", ""),
-                               word_count=len(c.get("content", ""))))
-            novel.total_chapters = len(n.get("chapters", []))
+            chapter_payload = n.get("chapters", [])
+            # 与导入逻辑一致：小书正文内联，大书落盘为章节文件
+            total_text = sum(len(c.get("content", "")) for c in chapter_payload)
+            inline = total_text <= 2 * 1024 * 1024 and n.get("file_type", "txt") == "txt"
+            novel_dir = config.NOVELS_DIR / novel.id
+            if not inline:
+                novel_dir.mkdir(parents=True, exist_ok=True)
+            for i, c in enumerate(chapter_payload):
+                content = c.get("content", "")
+                if inline:
+                    cpath, ccontent = "", content
+                else:
+                    cfile = novel_dir / f"{i:05d}.txt"
+                    cfile.write_text(f"{c.get('title', '')}\n\n{content}", encoding="utf-8")
+                    cpath, ccontent = cfile.relative_to(config.DATA_DIR).as_posix(), ""
+                db.add(Chapter(novel_id=novel.id, idx=c.get("idx", i),
+                               title=c.get("title", ""), content_path=cpath,
+                               content=ccontent, word_count=len(content)))
+            novel.total_chapters = len(chapter_payload)
+            # v2: 封面与 EPUB 图片
+            if n.get("cover_jpeg_b64"):
+                try:
+                    cover_dir = config.COVERS_DIR / novel.id
+                    cover_dir.mkdir(parents=True, exist_ok=True)
+                    (cover_dir / "cover.jpg").write_bytes(base64.b64decode(n["cover_jpeg_b64"]))
+                    novel.cover_path = (cover_dir / "cover.jpg").relative_to(config.DATA_DIR).as_posix()
+                except Exception:
+                    pass
+            if n.get("images_b64"):
+                img_dir = config.COVERS_DIR / novel.id / "images"
+                img_dir.mkdir(parents=True, exist_ok=True)
+                for name, b64 in n["images_b64"].items():
+                    safe = _uuid.uuid4().hex[:8] + "-" + "".join(ch for ch in name if ch.isalnum() or ch in "._-")[:60]
+                    try:
+                        (img_dir / safe).write_bytes(base64.b64decode(b64))
+                    except Exception:
+                        continue
             restored_novels += 1
         for t in request_bytes.get("notes", []):
             if not await db.get(Novel, t.get("novel_id", "")):

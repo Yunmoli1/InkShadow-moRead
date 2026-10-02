@@ -13,7 +13,7 @@ from ..schemas import (
     AiSummaryIn, AiSummaryOut, ChapterContentOut, ChapterOut, ImportResult,
     NoteIn, NoteOut, NovelOut, ProgressIn, ReadingSessionIn,
 )
-from ..services.ai_service import AiError, summarize
+from ..services.ai_service import AiError, stream_summarize, summarize
 from ..services.novel_parser import import_novel_file
 from .. import config
 
@@ -187,6 +187,50 @@ async def chapter_content(novel_id: str, chapter_id: str) -> ChapterContentOut:
         )
 
 
+@router.get("/{novel_id}/search")
+async def search_in_novel(novel_id: str, q: str = Query(..., min_length=1, max_length=100)) -> dict:
+    """书内全文搜索：标题与正文（含磁盘文件章节），返回带上下文片段的命中。"""
+    ql = q.strip().lower()
+    if not ql:
+        return {"query": q, "results": []}
+    async with SessionLocal() as db:
+        if await db.get(Novel, novel_id) is None:
+            raise HTTPException(404, "小说不存在")
+        rows = (await db.execute(
+            select(Chapter).where(Chapter.novel_id == novel_id).order_by(Chapter.idx)
+        )).scalars().all()
+    results = []
+    for c in rows:
+        content = c.content
+        if not content and c.content_path:
+            p = config.DATA_DIR / c.content_path
+            if p.exists():
+                try:
+                    content = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    content = ""
+        hits = []
+        if ql in c.title.lower():
+            hits.append({"where": "title", "snippet": c.title[:80]})
+        hay = content.lower()
+        start = 0
+        while len(hits) < 4:
+            pos = hay.find(ql, start)
+            if pos < 0:
+                break
+            s = max(0, pos - 25)
+            e = min(len(content), pos + len(ql) + 45)
+            snippet = content[s:e].replace("\n", " ")
+            hits.append({"where": "content",
+                         "snippet": ("…" if s > 0 else "") + snippet + ("…" if e < len(content) else "")})
+            start = pos + len(ql)
+        if hits:
+            results.append({"chapter_id": c.id, "chapter_idx": c.idx, "title": c.title, "hits": hits})
+        if len(results) >= 50:
+            break
+    return {"query": q, "results": results, "truncated": len(results) >= 50}
+
+
 @router.delete("/{novel_id}")
 async def delete_novel(novel_id: str) -> dict:
     async with SessionLocal() as db:
@@ -306,6 +350,69 @@ async def ai_summary(novel_id: str, body: AiSummaryIn) -> AiSummaryOut:
         await db.commit()
         return AiSummaryOut(novel_id=novel_id, chapter_id=body.chapter_id,
                             summary=summary, model=row.model, cached=False)
+
+
+@router.post("/{novel_id}/ai-summary/stream")
+async def ai_summary_stream(novel_id: str, body: AiSummaryIn):
+    """流式 AI 摘要（SSE）：delta 增量 / end 完成 / error 友好错误。"""
+    import json
+
+    from fastapi.responses import StreamingResponse
+
+    async with SessionLocal() as db:
+        c = await db.get(Chapter, body.chapter_id)
+        if c is None or c.novel_id != novel_id:
+            raise HTTPException(404, "章节不存在")
+        cached = await db.scalar(
+            select(AiSummary).where(
+                AiSummary.novel_id == novel_id, AiSummary.chapter_id == body.chapter_id
+            )
+        )
+        settings_rows = (await db.execute(select(Setting))).scalars().all()
+        settings = {s.key: s.value for s in settings_rows}
+        cached_summary = cached.summary if cached else None
+        content = ""
+        if cached_summary is None:
+            content = c.content
+            if not content and c.content_path:
+                p = config.DATA_DIR / c.content_path
+                content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            if not content.strip():
+                raise HTTPException(400, "章节内容为空，无法生成摘要")
+        chapter_idx = c.idx
+        chapter_id = body.chapter_id
+
+    async def gen():
+        if cached_summary is not None:
+            yield f"event: delta\ndata: {json.dumps({'text': cached_summary}, ensure_ascii=False)}\n\n"
+            yield f"event: end\ndata: {json.dumps({'summary': cached_summary, 'cached': True}, ensure_ascii=False)}\n\n"
+            return
+        buf = ""
+        try:
+            async for delta in stream_summarize(content, settings):
+                buf += delta
+                yield f"event: delta\ndata: {json.dumps({'text': delta}, ensure_ascii=False)}\n\n"
+        except AiError as exc:
+            if buf:
+                yield f"event: end\ndata: {json.dumps({'summary': buf, 'cached': False}, ensure_ascii=False)}\n\n"
+            else:
+                yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+            return
+        if not buf.strip():
+            yield f"event: error\ndata: {json.dumps({'message': 'AI 未返回内容，请检查模型是否可用。'}, ensure_ascii=False)}\n\n"
+            return
+        async with SessionLocal() as db2:
+            db2.add(AiSummary(novel_id=novel_id, chapter_id=chapter_id,
+                              chapter_idx=chapter_idx, summary=buf,
+                              model=str(settings.get("ai_model") or "llama3")))
+            await db2.commit()
+        yield f"event: end\ndata: {json.dumps({'summary': buf, 'cached': False}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/{novel_id}/reading-session")

@@ -8,6 +8,7 @@ import { Badge, Skeleton } from '@/components/ui/misc'
 import { api } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn, formatBytes, haptic, MEDIA_TYPE_LABEL } from '@/lib/utils'
+import { RefreshCw } from 'lucide-react'
 
 interface Media {
   id: string
@@ -16,6 +17,7 @@ interface Media {
   source_url: string
   file_size: number
   preview_url: string
+  thumbnail_url: string
   created_at?: string
 }
 
@@ -35,6 +37,7 @@ export default function Library() {
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
+  const [backfilling, setBackfilling] = useState(false)
   const navigate = useNavigate()
   const { toast } = useToast()
   const fileRef = useRef<HTMLInputElement>(null)
@@ -78,6 +81,19 @@ export default function Library() {
     }
   }
 
+  const backfill = async () => {
+    setBackfilling(true)
+    try {
+      const res = await api.post<{ message: string }>('/api/media/backfill-assets')
+      toast('success', res.message)
+      load()
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '补建失败')
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
   const remove = async (id: string) => {
     try {
       await api.delete(`/api/media/${id}`)
@@ -112,6 +128,9 @@ export default function Library() {
           />
           <Button variant="outline" className="shrink-0" onClick={() => fileRef.current?.click()} disabled={importing}>
             <Upload className="size-4" /> {importing ? '导入中…' : '批量导入'}
+          </Button>
+          <Button variant="outline" className="shrink-0" onClick={backfill} disabled={backfilling} title="为已有视频/图片生成时长与缩略图">
+            <RefreshCw className={cn('size-4', backfilling && 'animate-spin')} /> 补建缩略图
           </Button>
         </div>
       </div>
@@ -152,7 +171,7 @@ export default function Library() {
             >
               <div className="relative aspect-video bg-muted">
                 {m.media_type === 'image' ? (
-                  <img src={m.preview_url} alt={m.title} className="size-full object-cover" loading="lazy" />
+                  <img src={m.thumbnail_url || m.preview_url} alt={m.title} className="size-full object-cover" loading="lazy" />
                 ) : m.media_type === 'video' ? (
                   <video src={m.preview_url} className="size-full object-cover" preload="metadata" muted />
                 ) : (
