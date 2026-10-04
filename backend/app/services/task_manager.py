@@ -811,6 +811,28 @@ class TaskManager:
                     except Exception:
                         pass
             await db.commit()
+
+        # 网页正文提取（Wallabag 模式）：HTML 归档同时抽出一篇"文章"进书架，
+        # 复用阅读器全部能力（TTS/AI 摘要/笔记/书内搜索）。
+        try:
+            import asyncio as _aio
+
+            from .article_extractor import extract_article
+            from .novel_parser import import_article
+
+            for f in sorted(base.rglob("*")):
+                if not f.is_file() or f.suffix.lower() not in (".html", ".htm"):
+                    continue
+                try:
+                    raw = await _aio.to_thread(f.read_bytes)
+                    html = raw.decode("utf-8", errors="replace")
+                    article = await _aio.to_thread(extract_article, html)
+                    if article:
+                        await import_article(title=article["title"], text=article["text"], source_url=url)
+                except Exception:
+                    continue
+        except Exception:
+            pass
         # 只有网页外壳而没有目标内容：对非网页归档任务按失败处理（继续回退）
         if imported == 0 and spec.category != "page":
             raise NoContentError("工具执行成功但未下载到可导入的内容")

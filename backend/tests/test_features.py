@@ -179,3 +179,72 @@ def test_task_options_persist_and_retry(client):
                 break
             __import__("time").sleep(0.3)
         client.delete(f"/api/tasks/{x}")
+
+
+def test_article_extraction_unit(client):
+    """正文提取单元级验证：噪声页能抽出干净正文。"""
+    import asyncio
+
+    from app.services.article_extractor import extract_article
+
+    html = (
+        "<html><head><title>测试文章标题</title></head><body>"
+        "<nav>首页 分类 关于 登录</nav>"
+        "<article><h1>测试文章标题</h1>"
+        "<p>" + "这是一段足够长的正文内容，用来验证 readability 提取算法。" * 30 + "</p>"
+        "</article>"
+        "<footer>版权所有 广告位</footer>"
+        "</body></html>"
+    )
+    result = extract_article(html)
+    assert result is not None
+    assert "readability 提取算法" in result["text"]
+    assert "首页 分类" not in result["text"]
+    assert "广告位" not in result["text"]
+
+    # 导航页/登录墙 → None
+    assert extract_article("<html><body><a href=/x>登录</a></body></html>") is None
+    _ = asyncio  # noqa
+
+
+def test_extract_article_from_media_api(client):
+    """回归：网页归档 -> 提取正文 -> 文章进书架且阅读器可读。"""
+    body = "这是一篇关于本地优先知识库的长文章。" * 60
+    html = (
+        "<html><head><title>本地优先知识库漫谈</title></head><body>"
+        "<nav>导航 首页 关于</nav><article><p>" + body + "</p></article></body></html>"
+    ).encode("utf-8")
+    r = client.post("/api/media/batch-import", files=[
+        ("files", ("article.html", html, "text/html")),
+    ])
+    assert r.status_code == 201
+    page = client.get("/api/media", params={"media_type": "page"}).json()["items"][0]
+
+    res = client.post(f"/api/media/{page['id']}/extract-article")
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert "本地优先知识库" in data["title"]
+
+    novels = client.get("/api/novels", params={"search": "本地优先知识库漫谈"}).json()["items"]
+    assert len(novels) == 1
+    novel = novels[0]
+    assert novel["category"] == "文章" and novel["total_chapters"] == 1
+    chapters = client.get(f"/api/novels/{novel['id']}/chapters").json()
+    content = client.get(
+        f"/api/novels/{novel['id']}/chapters/{chapters['items'][0]['id']}/content"
+    ).json()
+    assert "本地优先知识库" in content["content"] and "导航 首页" not in content["content"]
+
+    res2 = client.post(f"/api/media/{page['id']}/extract-article").json()
+    assert res2["novel_id"] == novel["id"]
+
+    png = b"PNG" + bytes([0x0d, 0x0a, 0x1a]) + bytes(50)
+    client.post("/api/media/batch-import", files=[("files", ("x.png", png, "image/png"))])
+    img = client.get("/api/media", params={"media_type": "image"}).json()["items"][0]
+    assert client.post(f"/api/media/{img['id']}/extract-article").status_code == 400
+
+    client.delete(f"/api/novels/{novel['id']}")
+    client.delete(f"/api/media/{page['id']}")
+    client.delete(f"/api/media/{img['id']}")
+
+

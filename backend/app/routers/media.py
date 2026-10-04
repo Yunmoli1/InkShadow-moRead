@@ -222,6 +222,44 @@ def _content_disposition(filename: str) -> str:
     return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
 
 
+@router.post("/{media_id}/extract-article")
+async def extract_article_from_media(media_id: str) -> dict:
+    """把已归档网页（page 类型）的正文提取为"文章"入书架，返回小说信息。"""
+    import asyncio
+
+    from ..models import Novel
+    from ..services.article_extractor import extract_article
+    from ..services.novel_parser import import_article
+
+    async with SessionLocal() as db:
+        m = await db.get(MediaItem, media_id)
+        if m is None:
+            raise HTTPException(404, "资源不存在")
+        if m.media_type not in ("page", "doc"):
+            raise HTTPException(400, "仅网页归档可提取正文")
+        path = config.DATA_DIR / m.file_path
+        url = m.source_url
+    if not path.is_file():
+        raise HTTPException(410, "归档文件已被移动或删除")
+
+    def _extract():
+        raw = path.read_bytes()
+        for enc in ("utf-8", "gb18030", "big5"):
+            try:
+                return extract_article(raw.decode(enc))
+            except UnicodeDecodeError:
+                continue
+        return extract_article(raw.decode("utf-8", errors="replace"))
+
+    article = await asyncio.to_thread(_extract)
+    if not article:
+        raise HTTPException(422, "未能提取出有效正文（页面可能是导航页或需要 JS 渲染）")
+    novel = await import_article(title=article["title"], text=article["text"], source_url=url)
+    return {"novel_id": novel.id, "title": novel.title,
+            "chars": len(article["text"]),
+            "message": f"已提取正文《{novel.title}》到书架（文章分类）"}
+
+
 @router.delete("/{media_id}")
 async def delete_media(media_id: str, delete_file: bool = True) -> dict:
     async with SessionLocal() as db:

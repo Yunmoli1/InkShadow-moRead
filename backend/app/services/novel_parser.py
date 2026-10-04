@@ -311,6 +311,34 @@ async def _read_text_any_encoding(path: Path) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+async def import_article(title: str, text: str, source_url: str = "") -> Novel:
+    """网页提取的文章作为单章"文章"入书架；按 source_url 去重。"""
+    async with SessionLocal() as db:
+        if source_url:
+            exists = await db.scalar(select(Novel).where(Novel.source_url == source_url))
+            if exists:
+                return exists
+        else:
+            # 手工导入的归档没有来源 URL：按标题 + 文章分类去重
+            exists = await db.scalar(
+                select(Novel).where(Novel.title == (title or "未命名文章"), Novel.category == "文章")
+            )
+            if exists:
+                return exists
+        novel = Novel(
+            title=title or "未命名文章", author="",
+            source_url=source_url, file_type="html", category="文章",
+            total_chapters=1,
+        )
+        db.add(novel)
+        await db.flush()
+        db.add(Chapter(novel_id=novel.id, idx=0, title=title or "正文",
+                       content=text, word_count=len(text)))
+        await db.commit()
+        await db.refresh(novel)
+        return novel
+
+
 def find_local_novel_files(directory: Path) -> list[Path]:
     """Discover TXT/EPUB files in a directory (recursive)."""
     return [p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in (".txt", ".epub")]

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, ExternalLink, Trash2 } from 'lucide-react'
+import { ArrowLeft, BookOpen, ExternalLink, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/misc'
 import { api, withToken } from '@/lib/api'
@@ -61,6 +61,24 @@ export default function MediaDetail() {
       .catch(() => {})
   }, [mediaId])
 
+  // 网页归档 → 提取正文为"文章"入书架
+  const [extracting, setExtracting] = useState(false)
+  const extractArticle = async () => {
+    if (!mediaId) return
+    setExtracting(true)
+    try {
+      const res = await api.post<{ novel_id: string; title: string; message: string }>(
+        `/api/media/${mediaId}/extract-article`,
+      )
+      toast('success', res.message)
+      navigate(`/reader/${res.novel_id}`)
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '提取失败')
+    } finally {
+      setExtracting(false)
+    }
+  }
+
   const remove = async () => {
     if (!media) return
     try {
@@ -97,6 +115,11 @@ export default function MediaDetail() {
             <a href={media.source_url} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-primary" title={media.source_url}>
               <ExternalLink className="size-4" />
             </a>
+          )}
+          {media.media_type === 'page' && (
+            <Button size="sm" variant="outline" onClick={extractArticle} disabled={extracting}>
+              <BookOpen className="size-4" /> {extracting ? '提取中…' : '提取正文到书架'}
+            </Button>
           )}
           <Button variant="ghost" size="iconSm" onClick={remove} title="删除">
             <Trash2 className="size-4 text-destructive" />
