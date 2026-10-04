@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Badge, Progress, Skeleton } from '@/components/ui/misc'
 import { api } from '@/lib/api'
 import { useToast } from '@/components/Toast'
+import { Bell, BellOff, RefreshCw } from 'lucide-react'
 import { cn, formatBytes, haptic } from '@/lib/utils'
 
 interface Novel {
@@ -18,6 +19,8 @@ interface Novel {
   last_chapter_idx: number
   file_size: number
   file_type: string
+  subscribed: boolean
+  new_chapters: number
 }
 
 /** Web Worker 解析预览结果（大文件不阻塞 UI） */
@@ -35,6 +38,7 @@ export default function Shelf() {
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
   const [previews, setPreviews] = useState<WorkerPreview[]>([])
+  const [checking, setChecking] = useState(false)
   const navigate = useNavigate()
   const { toast } = useToast()
   const fileRef = useRef<HTMLInputElement>(null)
@@ -94,6 +98,34 @@ export default function Shelf() {
     }
   }
 
+  const toggleSubscribe = async (n: Novel) => {
+    try {
+      await api.patch(`/api/novels/${n.id}/subscribe`, { subscribed: !n.subscribed })
+      haptic()
+      toast('success', !n.subscribed ? '已开启追更（每 6 小时自动检查）' : '已关闭追更')
+      setNovels((ns) => ns.map((x) => (x.id === n.id
+        ? { ...x, subscribed: !n.subscribed, new_chapters: !n.subscribed ? 0 : x.new_chapters }
+        : x)))
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
+  const checkAll = async () => {
+    setChecking(true)
+    try {
+      const res = await api.post<{ checked: number }>('/api/novels/check-updates')
+      toast(res.checked > 0 ? 'success' : 'info',
+        res.checked > 0
+          ? `已为 ${res.checked} 本订阅书发起检查，完成后书架显示新章数`
+          : '所有订阅书近期已检查过')
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : '检查失败')
+    } finally {
+      setChecking(false)
+    }
+  }
+
   const remove = async (id: string) => {
     try {
       await api.delete(`/api/novels/${id}`)
@@ -120,6 +152,9 @@ export default function Shelf() {
           <input ref={fileRef} type="file" multiple hidden accept=".txt,.epub" onChange={(e) => importFiles(e.target.files)} />
           <Button variant="outline" className="shrink-0" onClick={() => fileRef.current?.click()} disabled={importing}>
             <Upload className="size-4" /> {importing ? '导入中…' : '导入 TXT/EPUB'}
+          </Button>
+          <Button variant="outline" className="shrink-0" onClick={checkAll} disabled={checking} title="检查所有订阅书的更新">
+            <RefreshCw className={cn('size-4', checking && 'animate-spin')} /> 检查更新
           </Button>
         </div>
       </div>
@@ -177,8 +212,25 @@ export default function Shelf() {
                 <Badge tone="outline" className="absolute left-2 top-2 bg-card/80 backdrop-blur">
                   {n.total_chapters} 章
                 </Badge>
+                {n.new_chapters > 0 && (
+                  <Badge tone="destructive" className="absolute left-2 top-9 bg-destructive text-destructive-foreground backdrop-blur">
+                    +{n.new_chapters} 新
+                  </Badge>
+                )}
+                {n.subscribed && (
+                  <span className="absolute right-2 top-[52px] hidden rounded-lg bg-card/80 p-1.5 text-success group-hover:block" title="追更中">
+                    <Bell className="size-4" />
+                  </span>
+                )}
                 <button
-                  className="absolute right-2 top-2 hidden rounded-lg bg-card/80 p-1.5 backdrop-blur hover:text-destructive group-hover:block"
+                  className="absolute right-2 top-2 hidden rounded-lg bg-card/80 p-1.5 backdrop-blur hover:text-primary group-hover:block"
+                  onClick={(e) => { e.stopPropagation(); toggleSubscribe(n) }}
+                  title={n.subscribed ? '关闭追更' : '开启追更'}
+                >
+                  {n.subscribed ? <BellOff className="size-4" /> : <Bell className="size-4" />}
+                </button>
+                <button
+                  className="absolute right-2 top-14 hidden rounded-lg bg-card/80 p-1.5 backdrop-blur hover:text-destructive group-hover:block"
                   onClick={(e) => { e.stopPropagation(); remove(n.id) }}
                   title="删除"
                 >

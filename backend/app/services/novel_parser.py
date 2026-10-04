@@ -369,7 +369,7 @@ async def import_lncrawl_output(out_dir: Path, source_url: str = "") -> Novel | 
 
     async with SessionLocal() as db:
         exists = await db.scalar(select(Novel).where(Novel.title == title, Novel.author == author))
-        if exists:
+        if exists and exists.total_chapters == len(chapter_files):
             # idempotent re-import: still backfill missing cover
             cover_src = meta_file.parent / "cover.jpg"
             if exists.cover_path == "" and cover_src.exists():
@@ -380,13 +380,26 @@ async def import_lncrawl_output(out_dir: Path, source_url: str = "") -> Novel | 
                 exists.cover_path = dest.relative_to(config.DATA_DIR).as_posix()
                 await db.commit()
             return exists
-        novel = Novel(
-            title=title, author=author, source_url=source_url or meta.get("url", ""),
-            description=description, file_type="txt", category="小说",
-            total_chapters=len(chapter_files),
-        )
-        db.add(novel)
-        await db.flush()
+        is_rebuild = False
+        if exists:
+            # 追更：新抓取的章节数多于已存 → 重建章节并标记新章数
+            is_rebuild = True
+            novel = exists
+            await db.execute(delete(Chapter).where(Chapter.novel_id == novel.id))
+            novel_dir = config.NOVELS_DIR / novel.id
+            shutil.rmtree(novel_dir, ignore_errors=True)
+            old_total = novel.total_chapters or 0
+            novel.total_chapters = len(chapter_files)
+            if novel.subscribed and len(chapter_files) > old_total:
+                novel.new_chapters = (novel.new_chapters or 0) + (len(chapter_files) - old_total)
+        if not is_rebuild:
+            novel = Novel(
+                title=title, author=author, source_url=source_url or meta.get("url", ""),
+                description=description, file_type="txt", category="小说",
+                total_chapters=len(chapter_files),
+            )
+            db.add(novel)
+            await db.flush()
         # cover
         cover_src = meta_file.parent / "cover.jpg"
         if cover_src.exists():

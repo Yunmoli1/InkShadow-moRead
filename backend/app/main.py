@@ -1,6 +1,7 @@
 """MoRead backend entrypoint."""
 from __future__ import annotations
 
+import asyncio
 import hmac
 import time
 from contextlib import asynccontextmanager
@@ -26,7 +27,12 @@ async def lifespan(app: FastAPI):
     requeued = await manager.takeover_on_startup()
     if requeued:
         print(f"[MoRead] 服务重启后已重新入队 {requeued} 个排队任务")
+    # 追更订阅后台循环
+    from .services.updater import auto_loop
+
+    updater_task = asyncio.create_task(auto_loop())
     yield
+    updater_task.cancel()
 
 
 app = FastAPI(

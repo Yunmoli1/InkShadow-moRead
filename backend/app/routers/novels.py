@@ -4,6 +4,8 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from pydantic import BaseModel
+
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from sqlalchemy import delete, func, select
 
@@ -26,7 +28,8 @@ def _novel_out(n: Novel) -> NovelOut:
         description=n.description, cover_path=n.cover_path, file_type=n.file_type,
         category=n.category, total_chapters=n.total_chapters, read_chapters=n.read_chapters,
         last_chapter_idx=n.last_chapter_idx, last_scroll_pos=n.last_scroll_pos,
-        file_size=n.file_size, created_at=n.created_at, updated_at=n.updated_at,
+        file_size=n.file_size, subscribed=bool(n.subscribed), new_chapters=n.new_chapters or 0,
+        created_at=n.created_at, updated_at=n.updated_at,
     )
 
 
@@ -428,6 +431,42 @@ async def ai_summary_stream(novel_id: str, body: AiSummaryIn):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class SubscribeIn(BaseModel):
+    subscribed: bool
+
+
+@router.patch("/{novel_id}/subscribe")
+async def subscribe_novel(novel_id: str, body: SubscribeIn) -> dict:
+    async with SessionLocal() as db:
+        n = await db.get(Novel, novel_id)
+        if n is None:
+            raise HTTPException(404, "小说不存在")
+        n.subscribed = body.subscribed
+        if not body.subscribed:
+            n.new_chapters = 0
+        await db.commit()
+    return {"id": novel_id, "subscribed": body.subscribed,
+            "message": "已开启追更（每 6 小时自动检查）" if body.subscribed else "已关闭追更"}
+
+
+@router.post("/{novel_id}/check-update")
+async def check_novel_update(novel_id: str) -> dict:
+    from ..services.updater import check_novel
+
+    try:
+        return await check_novel(novel_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.post("/check-updates")
+async def check_all_updates() -> dict:
+    """检查所有订阅书（跳过 6 小时内已检查的）。"""
+    from ..services.updater import check_all
+
+    return await check_all(reason="manual")
 
 
 @router.post("/{novel_id}/reading-session")

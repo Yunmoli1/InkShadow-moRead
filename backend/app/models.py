@@ -34,6 +34,11 @@ class Novel(Base):
     last_chapter_idx: Mapped[int] = mapped_column(Integer, default=0)
     last_scroll_pos: Mapped[float] = mapped_column(Float, default=0.0)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
+    # 追更订阅
+    subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    new_chapters: Mapped[int] = mapped_column(Integer, default=0)  # 待读新章数
+    last_check_chapters: Mapped[int] = mapped_column(Integer, default=0)  # 上次检查时章节数
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

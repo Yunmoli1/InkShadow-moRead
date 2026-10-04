@@ -90,6 +90,8 @@ class NovelOut(BaseModel):
     last_chapter_idx: int
     last_scroll_pos: float
     file_size: int
+    subscribed: bool = False
+    new_chapters: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

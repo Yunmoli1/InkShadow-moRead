@@ -38,6 +38,10 @@ async def init_db() -> None:
 
         migrations = [
             "ALTER TABLE tasks ADD COLUMN options JSON",
+            "ALTER TABLE novels ADD COLUMN subscribed BOOLEAN",
+            "ALTER TABLE novels ADD COLUMN new_chapters INTEGER",
+            "ALTER TABLE novels ADD COLUMN last_check_chapters INTEGER",
+            "ALTER TABLE novels ADD COLUMN last_check_at DATETIME",
             "CREATE INDEX IF NOT EXISTS ix_media_title ON media (title)",
             "CREATE INDEX IF NOT EXISTS ix_media_source ON media (source_url)",
             "CREATE INDEX IF NOT EXISTS ix_notes_novel_chapter ON notes (novel_id, chapter_idx)",
