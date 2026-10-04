@@ -1,5 +1,6 @@
 """Media endpoints: list / detail / file serving (Range) / delete / batch import."""
 
+import asyncio
 import mimetypes
 import re
 import urllib.parse
@@ -17,6 +18,12 @@ from ..schemas import MediaOut
 router = APIRouter(prefix="/api/media", tags=["media"])
 
 
+def _write_chunks(dest, chunks: list[bytes]) -> None:
+    with open(dest, "wb") as fh:
+        for c in chunks:
+            fh.write(c)
+
+
 def _media_out(m: MediaItem) -> MediaOut:
     return MediaOut(
         id=m.id, media_type=m.media_type, title=m.title, source_url=m.source_url,
@@ -29,25 +36,29 @@ def _media_out(m: MediaItem) -> MediaOut:
     )
 
 
-@router.get("", response_model=list[MediaOut])
+@router.get("")
 async def list_media(
     page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100),
     media_type: str | None = Query(None, description="image/video/audio/page/doc"),
     search: str | None = None,
-) -> list[MediaOut]:
+) -> dict:
     async with SessionLocal() as db:
         q = select(MediaItem)
+        count_q = select(func.count(MediaItem.id))
         if media_type and media_type != "全部":
-            if media_type == "page":
-                q = q.where(MediaItem.media_type == "page")
-            else:
-                q = q.where(MediaItem.media_type == media_type)
+            cond = MediaItem.media_type == media_type
+            q = q.where(cond)
+            count_q = count_q.where(cond)
         if search:
-            q = q.where(MediaItem.title.contains(search) | MediaItem.source_url.contains(search))
+            cond = MediaItem.title.contains(search) | MediaItem.source_url.contains(search)
+            q = q.where(cond)
+            count_q = count_q.where(cond)
+        total = (await db.execute(count_q)).scalar() or 0
         rows = (await db.execute(
             q.order_by(MediaItem.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
         )).scalars().all()
-        return [_media_out(m) for m in rows]
+        return {"items": [_media_out(m) for m in rows], "total": total,
+                "page": page, "page_size": page_size}
 
 
 @router.post("/batch-import", response_model=dict, status_code=201)
@@ -72,9 +83,14 @@ async def batch_import(files: list[UploadFile] = File(...)) -> dict:
             rel_dir.mkdir(parents=True, exist_ok=True)
             safe_name = re.sub(r'[\\/:*?"<>|]', "_", name)
             dest = rel_dir / safe_name
-            with open(dest, "wb") as fh:
-                while chunk := await f.read(1024 * 1024):
-                    fh.write(chunk)
+            # 异步分块读取 + 线程池落盘，避免大文件阻塞事件循环
+            chunks: list[bytes] = []
+            while True:
+                chunk = await f.read(1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            await asyncio.to_thread(_write_chunks, dest, chunks)
             db.add(MediaItem(
                 media_type=mtype, title=name.rsplit(".", 1)[0],
                 file_path=dest.relative_to(config.DATA_DIR).as_posix(),

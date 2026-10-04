@@ -43,15 +43,19 @@ export default function Library() {
   const fileRef = useRef<HTMLInputElement>(null)
   const timer = useRef<number>()
 
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+
   const load = async () => {
     setLoading(true)
     try {
-      const data = await api.get<Media[]>('/api/media', {
+      const data = await api.get<{ items: Media[]; total: number }>('/api/media', {
         media_type: type === '全部' ? undefined : type,
         search: search || undefined,
-        page_size: 60,
+        page, page_size: 24,
       })
-      setItems(data)
+      setItems(data.items)
+      setTotal(data.total)
     } catch (err) {
       toast('error', err instanceof Error ? err.message : '加载资源失败')
     } finally {
@@ -59,7 +63,7 @@ export default function Library() {
     }
   }
 
-  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [type])
+  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [type, page])
 
   const onSearch = (v: string) => {
     setSearch(v)
@@ -110,7 +114,7 @@ export default function Library() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-serif text-2xl font-semibold">资源库</h1>
-          <p className="mt-1 text-sm text-muted-foreground">图片 · 视频 · 音频 · 网页归档，统一管理</p>
+          <p className="mt-1 text-sm text-muted-foreground">共 {total} 项 · 图片 / 视频 / 音频 / 网页归档</p>
         </div>
         <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
           <div className="relative min-w-0 flex-1 sm:flex-none">
@@ -139,7 +143,7 @@ export default function Library() {
         {FILTERS.map((f) => (
           <button
             key={f}
-            onClick={() => { haptic(); setType(f) }}
+            onClick={() => { haptic(); setType(f); setPage(1) }}
             className={cn(
               'h-9 rounded-lg px-4 text-sm transition-colors',
               type === f ? 'bg-primary text-primary-foreground' : 'bg-secondary hover:bg-accent',
@@ -196,6 +200,14 @@ export default function Library() {
               </div>
             </Card>
           ))}
+        </div>
+      )}
+
+      {total > 24 && (
+        <div className="flex items-center justify-center gap-3 pt-2 text-sm">
+          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</Button>
+          <span className="text-muted-foreground">{page} / {Math.ceil(total / 24)}</span>
+          <Button variant="outline" size="sm" disabled={page >= Math.ceil(total / 24)} onClick={() => setPage((p) => p + 1)}>下一页</Button>
         </div>
       )}
     </div>

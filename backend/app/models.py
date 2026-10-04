@@ -108,6 +108,7 @@ class DownloadTask(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     output_dir: Mapped[str] = mapped_column(String(1024), default="")
     argv: Mapped[list] = mapped_column(JSON, default=list)       # command to (re)execute
+    options: Mapped[dict] = mapped_column(JSON, default=dict)    # 工具参数（暂停/恢复/重试需保留）
     dest_type: Mapped[str] = mapped_column(String(16), default="media")  # media / novel
     log_tail: Mapped[list] = mapped_column(JSON, default=list)   # last N log lines
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

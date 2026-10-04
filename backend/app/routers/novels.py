@@ -72,21 +72,28 @@ async def reading_stats() -> dict:
         }
 
 
-@router.get("", response_model=list[NovelOut])
+@router.get("")
 async def list_novels(
     page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100),
     search: str | None = None, category: str | None = None,
-) -> list[NovelOut]:
+) -> dict:
     async with SessionLocal() as db:
         q = select(Novel)
+        count_q = select(func.count(Novel.id))
         if search:
-            q = q.where(Novel.title.contains(search) | Novel.author.contains(search))
+            like = f"%{search}%"
+            cond = Novel.title.like(like) | Novel.author.like(like)
+            q = q.where(cond)
+            count_q = count_q.where(cond)
         if category and category != "全部":
             q = q.where(Novel.category == category)
+            count_q = count_q.where(Novel.category == category)
+        total = (await db.execute(count_q)).scalar() or 0
         rows = (await db.execute(
             q.order_by(Novel.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
         )).scalars().all()
-        return [_novel_out(n) for n in rows]
+        return {"items": [_novel_out(n) for n in rows], "total": total,
+                "page": page, "page_size": page_size}
 
 
 @router.post("/import", response_model=ImportResult)
@@ -100,9 +107,17 @@ async def import_novels(files: list[UploadFile] = File(...)) -> ImportResult:
             continue
         tmp = config.DOWNLOADS_DIR / f"import_{uuid.uuid4().hex[:8]}_{f.filename}"
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "wb") as fh:
-            while chunk := await f.read(1024 * 1024):
-                fh.write(chunk)
+        chunks = []
+        while chunk := await f.read(1024 * 1024):
+            chunks.append(chunk)
+        import asyncio
+
+        def _flush() -> None:
+            with open(tmp, "wb") as fh:
+                for c in chunks:
+                    fh.write(c)
+
+        await asyncio.to_thread(_flush)
         try:
             original_stem = f.filename.rsplit(".", 1)[0] if f.filename else None
             novel = await import_novel_file(tmp, fallback_title=original_stem)

@@ -40,11 +40,17 @@ export default function Shelf() {
   const fileRef = useRef<HTMLInputElement>(null)
   const timer = useRef<number>()
 
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+
   const load = async () => {
     setLoading(true)
     try {
-      const data = await api.get<Novel[]>('/api/novels', { page_size: 60, search: search || undefined })
-      setNovels(data)
+      const data = await api.get<{ items: Novel[]; total: number }>('/api/novels', {
+        page, page_size: 24, search: search || undefined,
+      })
+      setNovels(data.items)
+      setTotal(data.total)
     } catch (err) {
       toast('error', err instanceof Error ? err.message : '加载书架失败')
     } finally {
@@ -52,7 +58,7 @@ export default function Shelf() {
     }
   }
 
-  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [])
+  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [page])
 
   const onSearch = (v: string) => {
     setSearch(v)
@@ -104,7 +110,7 @@ export default function Shelf() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-serif text-2xl font-semibold">书架</h1>
-          <p className="mt-1 text-sm text-muted-foreground">共 {novels.length} 本 · 支持搜索 / 删除 / 批量导入</p>
+          <p className="mt-1 text-sm text-muted-foreground">共 {total} 本 · 支持搜索 / 删除 / 批量导入</p>
         </div>
         <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
           <div className="relative min-w-0 flex-1 sm:flex-none">
@@ -193,6 +199,14 @@ export default function Shelf() {
               </div>
             </Card>
           ))}
+        </div>
+      )}
+
+      {total > 24 && (
+        <div className="flex items-center justify-center gap-3 pt-2 text-sm">
+          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>上一页</Button>
+          <span className="text-muted-foreground">{page} / {Math.ceil(total / 24)}</span>
+          <Button variant="outline" size="sm" disabled={page >= Math.ceil(total / 24)} onClick={() => setPage((p) => p + 1)}>下一页</Button>
         </div>
       )}
     </div>

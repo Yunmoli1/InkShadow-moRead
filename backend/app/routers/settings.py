@@ -129,6 +129,7 @@ async def backup_export() -> FileResponse:
             if cover_raw:
                 cover_b64 = base64.b64encode(cover_raw).decode()
             novel_payload.append({
+                "backup_id": n.id,  # 备份内稳定引用，导入时用于笔记映射
                 "title": n.title, "author": n.author,
                 "source_url": n.source_url, "description": n.description,
                 "file_type": n.file_type, "category": n.category,
@@ -139,7 +140,7 @@ async def backup_export() -> FileResponse:
                 "images_b64": images_b64,
             })
         payload = {
-            "app": "MoRead", "version": 2,
+            "app": "MoRead", "version": 3,
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "novels": novel_payload,
             "notes": [
@@ -155,23 +156,46 @@ async def backup_export() -> FileResponse:
             "settings": {s.key: s.value for s in settings_rows},
         }
     out = config.BACKUPS_DIR / f"moread-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
-    out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    # 原子写：先写临时文件再替换，避免中途失败留下损坏备份；同步 I/O 移出事件循环
+    import asyncio
+    import os
+
+    def _write_atomic() -> None:
+        tmp = out.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, out)
+
+    await asyncio.to_thread(_write_atomic)
     return FileResponse(out, media_type="application/json", filename=out.name)
 
 
 @router.post("/backup/import")
 async def backup_import(request_bytes: dict) -> dict:
-    """Accept decrypted backup JSON. v2 完整格式与 v1 旧格式均可。"""
+    """Accept decrypted backup JSON. v3（含笔记映射）/ v2 / v1 均可。"""
+    import asyncio
     import base64
+    import os
     import uuid as _uuid
 
     if request_bytes.get("app") != "MoRead":
         raise HTTPException(400, "不是有效的墨读备份文件")
-    restored_novels = restored_notes = 0
+    restored_novels = restored_notes = skipped_notes = 0
+    id_map: dict[str, str] = {}  # 备份内 novel_id -> 本库 novel_id
+    novel_writes: list[tuple] = []  # (dir, filename, text) 大书章节落盘任务
+
+    def _write_batch(jobs: list[tuple]) -> None:
+        for d, name, text in jobs:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / name).write_text(text, encoding="utf-8")
+
     async with SessionLocal() as db:
         for n in request_bytes.get("novels", []):
+            backup_id = n.get("backup_id", "")
             exists = await db.scalar(select(Novel).where(Novel.title == n.get("title", ""), Novel.author == n.get("author", "")))
             if exists:
+                # 已存在：不重建，但记录映射，使笔记挂到现有书籍
+                if backup_id:
+                    id_map[backup_id] = exists.id
                 continue
             novel = Novel(
                 title=n.get("title", "未命名"), author=n.get("author", ""),
@@ -182,26 +206,27 @@ async def backup_import(request_bytes: dict) -> dict:
             )
             db.add(novel)
             await db.flush()
+            if backup_id:
+                id_map[backup_id] = novel.id
             chapter_payload = n.get("chapters", [])
             # 与导入逻辑一致：小书正文内联，大书落盘为章节文件
             total_text = sum(len(c.get("content", "")) for c in chapter_payload)
             inline = total_text <= 2 * 1024 * 1024 and n.get("file_type", "txt") == "txt"
             novel_dir = config.NOVELS_DIR / novel.id
-            if not inline:
-                novel_dir.mkdir(parents=True, exist_ok=True)
             for i, c in enumerate(chapter_payload):
                 content = c.get("content", "")
                 if inline:
                     cpath, ccontent = "", content
                 else:
                     cfile = novel_dir / f"{i:05d}.txt"
-                    cfile.write_text(f"{c.get('title', '')}\n\n{content}", encoding="utf-8")
+                    # 同步写盘收拢后移出事件循环执行
+                    novel_writes.append((novel_dir, f"{i:05d}.txt", f"{c.get('title', '')}\n\n{content}"))
                     cpath, ccontent = cfile.relative_to(config.DATA_DIR).as_posix(), ""
                 db.add(Chapter(novel_id=novel.id, idx=c.get("idx", i),
                                title=c.get("title", ""), content_path=cpath,
                                content=ccontent, word_count=len(content)))
             novel.total_chapters = len(chapter_payload)
-            # v2: 封面与 EPUB 图片
+            # v2+: 封面与 EPUB 图片
             if n.get("cover_jpeg_b64"):
                 try:
                     cover_dir = config.COVERS_DIR / novel.id
@@ -220,10 +245,25 @@ async def backup_import(request_bytes: dict) -> dict:
                     except Exception:
                         continue
             restored_novels += 1
+        if novel_writes:
+            await asyncio.to_thread(_write_batch, novel_writes)
         for t in request_bytes.get("notes", []):
-            if not await db.get(Novel, t.get("novel_id", "")):
+            # 通过 backup_id 映射到新库 ID；映射不到（v1 备份/书籍缺失）则跳过
+            mapped = id_map.get(t.get("novel_id", ""))
+            if not mapped:
+                skipped_notes += 1
                 continue
-            db.add(Note(novel_id=t["novel_id"], chapter_id=t.get("chapter_id"),
+            # 重复导入去重：同书同章同内容视为同一条笔记
+            dup = await db.scalar(
+                select(Note.id).where(
+                    Note.novel_id == mapped,
+                    Note.chapter_idx == t.get("chapter_idx", 0),
+                    Note.content == t.get("content", ""),
+                )
+            )
+            if dup:
+                continue
+            db.add(Note(novel_id=mapped, chapter_id=None,
                         chapter_title=t.get("chapter_title", ""), chapter_idx=t.get("chapter_idx", 0),
                         excerpt=t.get("excerpt", ""), content=t.get("content", "")))
             restored_notes += 1
@@ -234,8 +274,11 @@ async def backup_import(request_bytes: dict) -> dict:
             else:
                 db.add(Setting(key=key, value=value))
         await db.commit()
+    msg = f"已恢复 {restored_novels} 本小说与 {restored_notes} 条笔记"
+    if skipped_notes:
+        msg += f"（{skipped_notes} 条笔记因原书缺失未恢复）"
     return {"restored_novels": restored_novels, "restored_notes": restored_notes,
-            "message": f"已恢复 {restored_novels} 本小说与 {restored_notes} 条笔记"}
+            "skipped_notes": skipped_notes, "message": msg}
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """MoRead backend entrypoint."""
 from __future__ import annotations
 
+import hmac
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,6 +20,12 @@ from .routers import media, novels, settings, tasks, tools
 async def lifespan(app: FastAPI):
     config.ensure_dirs()
     await init_db()
+    # 任务接管：排队中的重新入队，运行中的标记中断（可重试）
+    from .services.task_manager import manager
+
+    requeued = await manager.takeover_on_startup()
+    if requeued:
+        print(f"[MoRead] 服务重启后已重新入队 {requeued} 个排队任务")
     yield
 
 
@@ -61,7 +68,7 @@ async def access_token_guard(request: Request, call_next):
                 or request.query_params.get("token")
                 or ""
             )
-            if provided != token:
+            if not hmac.compare_digest(provided, token):
                 return JSONResponse({"detail": "需要访问令牌"}, status_code=401)
     return await call_next(request)
 

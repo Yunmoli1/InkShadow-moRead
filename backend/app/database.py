@@ -33,3 +33,17 @@ async def init_db() -> None:
     config.ensure_dirs()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all 不会为已存在的表补列/补索引——这里做轻量迁移
+        from sqlalchemy import text
+
+        migrations = [
+            "ALTER TABLE tasks ADD COLUMN options JSON",
+            "CREATE INDEX IF NOT EXISTS ix_media_title ON media (title)",
+            "CREATE INDEX IF NOT EXISTS ix_media_source ON media (source_url)",
+            "CREATE INDEX IF NOT EXISTS ix_notes_novel_chapter ON notes (novel_id, chapter_idx)",
+        ]
+        for stmt in migrations:
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                pass  # 列/索引已存在

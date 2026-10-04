@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckCircle2, CircleX, Loader2, Pause, Play, Trash2, Timer } from 'lucide-react'
+import { CheckCircle2, CircleX, Loader2, Pause, Play, RotateCcw, Trash2, Timer } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge, Skeleton } from '@/components/ui/misc'
@@ -100,7 +100,17 @@ export default function Tasks() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.filter((t) => t.status === 'running' || t.status === 'queued').map((t) => t.id).join(',')])
 
-  const act = async (id: string, action: 'pause' | 'resume' | 'delete') => {
+  const act = async (id: string, action: 'pause' | 'resume' | 'delete' | 'retry') => {
+    if (action === 'retry') {
+      try {
+        const res = await api.post<{ message: string }>(`/api/tasks/${id}/retry`)
+        toast('success', res.message)
+        load()
+      } catch (err) {
+        toast('error', err instanceof Error ? err.message : '重试失败')
+      }
+      return
+    }
     try {
       if (action === 'delete') {
         await api.delete(`/api/tasks/${id}`)
@@ -174,6 +184,11 @@ export default function Tasks() {
                   {t.status === 'paused' && (
                     <Button variant="ghost" size="iconSm" title="恢复（断点续传）" onClick={() => act(t.id, 'resume')}>
                       <Play className="size-4" />
+                    </Button>
+                  )}
+                  {(t.status === 'failed' || t.status === 'canceled') && (
+                    <Button variant="ghost" size="iconSm" title="重试（支持断点续传）" onClick={() => act(t.id, 'retry')}>
+                      <RotateCcw className="size-4 text-primary" />
                     </Button>
                   )}
                   <Button variant="ghost" size="iconSm" title="取消并删除" onClick={() => act(t.id, 'delete')}>

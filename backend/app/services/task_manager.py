@@ -126,6 +126,7 @@ class TaskManager:
         task = DownloadTask(
             tool=tool, task_type=task_type, url=url, title=title or url,
             status="queued", output_dir=out_dir, dest_type=dest_type,
+            options=options,
         )
         async with SessionLocal() as db:
             db.add(task)
@@ -154,12 +155,55 @@ class TaskManager:
                 return False
             spec = tool_registry.get_spec(task.tool)
             url = task.url
-            options = {}
+            options = dict(task.options or {})  # 恢复时还原原始工具参数
         self.pause_flags.pop(task_id, None)
         await self._update_status(task_id, status="queued", message="已恢复排队")
         worker = asyncio.create_task(self._run_task(task_id, spec, url, options))
         self._worker_tasks[task_id] = worker
         return True
+
+    async def takeover_on_startup(self) -> int:
+        """服务重启后的任务接管：运行中任务标记为中断（可重试），排队任务重新入队。"""
+        requeued = 0
+        async with SessionLocal() as db:
+            rows = (await db.execute(
+                select(DownloadTask).where(DownloadTask.status.in_(["running", "queued"]))
+            )).scalars().all()
+            to_run: list[tuple[str, str, dict]] = []
+            for t in rows:
+                if t.status == "running":
+                    t.status = "failed"
+                    t.message = "服务重启导致任务中断，可点击重试继续（支持断点续传）"
+                    t.finished_at = _now()
+                else:
+                    to_run.append((t.id, t.tool, dict(t.options or {})))
+            await db.commit()
+        for task_id, tool, options in to_run:
+            spec = tool_registry.get_spec(tool)
+            if spec is None:
+                continue
+            requeued += 1
+            worker = asyncio.create_task(self._run_task(task_id, spec, "", options))
+            self._worker_tasks[task_id] = worker
+        return requeued
+
+    async def retry(self, task_id: str) -> DownloadTask | None:
+        """重试失败/取消的任务：复制原任务参数创建新任务（支持断点续传）。"""
+        async with SessionLocal() as db:
+            task = await db.get(DownloadTask, task_id)
+            if task is None or task.status not in ("failed", "canceled"):
+                return None
+            spec = tool_registry.get_spec(task.tool)
+            if spec is None:
+                return None
+            tool, url = task.tool, task.url
+            options = dict(task.options or {})
+            dest_type = task.dest_type
+            title = task.title
+        new_task = await self.create_task(
+            tool=tool, url=url, options=options, dest_type=dest_type, title=title,
+        )
+        return new_task
 
     async def cancel(self, task_id: str) -> bool:
         self.cancel_flags.setdefault(task_id, asyncio.Event()).set()
@@ -231,8 +275,8 @@ class TaskManager:
 
         async with SessionLocal() as db:
             task = await db.get(DownloadTask, task_id)
-            if task is None or task.status in TERMINAL_STATES:
-                return
+            if task is None or task.status in TERMINAL_STATES or task.status == "paused":
+                return  # 竞态保护：入队瞬间被暂停/取消的任务不再启动
             task.status = "running"
             task.started_at = _now()
             task.message = "启动工具…"

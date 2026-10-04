@@ -121,7 +121,7 @@ def test_grab_page_flow(client):
 
     # media library has the page archive
     r = client.get("/api/media", params={"media_type": "page"})
-    items = r.json()
+    items = r.json()["items"]
     assert len(items) >= 1
     item = items[0]
     assert item["preview_url"].startswith("/api/media/")
@@ -142,7 +142,7 @@ def test_media_batch_import_and_delete(client):
     assert r.status_code == 201
     data = r.json()
     assert data["count"] == 1 and data["skipped"] == ["b.txt"]
-    media_id = client.get("/api/media", params={"media_type": "image"}).json()[0]["id"]
+    media_id = client.get("/api/media", params={"media_type": "image"}).json()["items"][0]["id"]
     detail = client.get(f"/api/media/{media_id}")
     assert detail.status_code == 200 and detail.json()["media_type"] == "image"
     assert client.delete(f"/api/media/{media_id}").status_code == 200
@@ -232,7 +232,7 @@ def test_novel_import_tricky_heading_formats(client):
     res = r.json()
     assert len(res["imported"]) == 1 and not res["errors"], res
 
-    novels = client.get("/api/novels", params={"search": "奇奇怪怪格式的书"}).json()
+    novels = client.get("/api/novels", params={"search": "奇奇怪怪格式的书"}).json()["items"]
     assert len(novels) == 1
     novel = novels[0]
     # 10 个标题行（1-空格 / 2-装饰 / 3-纯数字 / 4-顿号 / 12.-点 / （五） /
@@ -251,7 +251,7 @@ def test_novel_import_epub_urlencoded_href(client):
     res = r.json()
     assert len(res["imported"]) == 1 and not res["errors"], res
 
-    novels = client.get("/api/novels", params={"search": "EPUB测试书"}).json()
+    novels = client.get("/api/novels", params={"search": "EPUB测试书"}).json()["items"]
     assert len(novels) == 1
     novel = novels[0]
     assert novel["total_chapters"] == 3, novel["total_chapters"]
@@ -273,7 +273,7 @@ def test_novel_reimport_repairs_chapter_split(client):
         ("files", (name, _make_tricky_txt(), "text/plain")),
     ])
     assert r1.status_code == 200
-    novels = client.get("/api/novels", params={"search": "奇奇怪怪格式的书"}).json()
+    novels = client.get("/api/novels", params={"search": "奇奇怪怪格式的书"}).json()["items"]
     nid = novels[0]["id"]
 
     # 模拟旧版错误解析：把章节数改小（如旧规则把 9 章合并成 1 章）
@@ -305,7 +305,7 @@ def test_novel_full_flow(client):
     assert len(res["imported"]) == 1 and not res["errors"]
 
     # shelf list + search + detail
-    novels = client.get("/api/novels", params={"search": "测试之书"}).json()
+    novels = client.get("/api/novels", params={"search": "测试之书"}).json()["items"]
     assert len(novels) == 1
     novel = novels[0]
     nid = novel["id"]

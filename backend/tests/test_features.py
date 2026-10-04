@@ -29,18 +29,18 @@ def test_backup_v2_roundtrip_large_novel(client):
         ("files", (f"big_{uuid.uuid4().hex[:6]}.txt", data, "text/plain")),
     ])
     assert r.status_code == 200 and r.json()["imported"]
-    novel = client.get("/api/novels", params={"search": "大书备份测试"}).json()[0]
+    novel = client.get("/api/novels", params={"search": "大书备份测试"}).json()["items"][0]
     nid = novel["id"]
 
     exp = client.get("/api/backup/export")
     payload = exp.json()
-    assert payload["version"] == 2
+    assert payload["version"] == 3
     book = next(b for b in payload["novels"] if b["title"] == "大书备份测试")
     assert sum(len(c["content"]) for c in book["chapters"]) > 2 * 1024 * 1024, "大书正文应被内联"
     assert client.delete(f"/api/novels/{nid}").status_code == 200
     imp = client.post("/api/backup/import", json=payload)
     assert imp.status_code == 200 and imp.json()["restored_novels"] >= 1
-    restored = client.get("/api/novels", params={"search": "大书备份测试"}).json()[0]
+    restored = client.get("/api/novels", params={"search": "大书备份测试"}).json()["items"][0]
     chapters = client.get(f"/api/novels/{restored['id']}/chapters", params={"limit": 200}).json()
     assert chapters["total"] == 80
     sample = client.get(
@@ -56,7 +56,7 @@ def test_novel_in_book_search(client):
         ("files", (f"srch_{uuid.uuid4().hex[:6]}.txt", _make_novel_txt(3), "text/plain")),
     ])
     assert r.status_code == 200
-    novel = client.get("/api/novels", params={"search": "测试之书"}).json()[0]
+    novel = client.get("/api/novels", params={"search": "测试之书"}).json()["items"][0]
     res = client.get(f"/api/novels/{novel['id']}/search", params={"q": "验证章节解析"})
     body = res.json()
     assert res.status_code == 200 and len(body["results"]) >= 1
@@ -70,7 +70,7 @@ def test_media_progress_and_backfill(client):
     client.post("/api/media/batch-import", files=[
         ("files", ("pv.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 500, "image/png")),
     ])
-    media = client.get("/api/media", params={"media_type": "image"}).json()[0]
+    media = client.get("/api/media", params={"media_type": "image"}).json()["items"][0]
     mid = media["id"]
     r = client.patch(f"/api/media/{mid}/progress", json={"position": 42.5})
     assert r.status_code == 200 and r.json()["progress"] == 42.5
@@ -95,3 +95,87 @@ def test_access_token_guard(client):
         client.put("/api/settings", json={"access_token": ""},
                    headers={"X-MoRead-Token": "test-token-123"})
     assert client.get("/api/novels").status_code == 200
+
+
+def test_backup_notes_roundtrip(client):
+    """回归（评审 6.1）：备份跨实例恢复后笔记通过 backup_id 重映射不丢失；
+    已存在同书时笔记也应挂到现有书上且不重复。"""
+    r = client.post("/api/novels/import", files=[
+        ("files", (f"nt_{uuid.uuid4().hex[:6]}.txt", _make_novel_txt(3), "text/plain")),
+    ])
+    assert r.status_code == 200
+    novel = client.get("/api/novels", params={"search": "测试之书"}).json()["items"][0]
+    nid = novel["id"]
+    note = client.post(f"/api/novels/{nid}/notes", json={
+        "chapter_idx": 1, "chapter_title": "第2章 测试章节",
+        "excerpt": "回归摘录", "content": "跨实例笔记回归",
+    })
+    assert note.status_code == 201
+
+    payload = client.get("/api/backup/export").json()
+    assert payload["version"] == 3 and payload["novels"][0].get("backup_id")
+
+    # 场景 A：删除后全新实例恢复
+    assert client.delete(f"/api/novels/{nid}").status_code == 200
+    imp = client.post("/api/backup/import", json=payload).json()
+    assert imp["restored_novels"] == 1 and imp["restored_notes"] == 1, imp
+    restored = client.get("/api/novels", params={"search": "测试之书"}).json()["items"][0]
+    assert restored["id"] != nid  # 新 UUID
+    notes = client.get(f"/api/novels/{restored['id']}/notes").json()
+    assert len(notes) == 1 and notes[0]["content"] == "跨实例笔记回归"
+    assert notes[0]["chapter_idx"] == 1
+
+    # 场景 B：再次导入同备份 → 书已存在，笔记映射到现有书但不重复创建
+    imp2 = client.post("/api/backup/import", json=payload).json()
+    assert imp2["restored_novels"] == 0
+    notes2 = client.get(f"/api/novels/{restored['id']}/notes").json()
+    assert len(notes2) == 1, "重复导入不应产生重复笔记"
+    assert client.delete(f"/api/novels/{restored['id']}").status_code == 200
+
+
+def test_task_options_persist_and_retry(client):
+    """回归（评审 6.2）：任务 options 持久化，重试复制原参数。"""
+    # builtin 页面任务带自定义 options
+    r = client.post("/api/tools/builtin-web-saver/download", json={
+        "url": "https://example.com/options-test", "options": {"marker": "keep-me"},
+    })
+    assert r.status_code == 201
+    tid = r.json()["task_id"]
+    task = client.get(f"/api/tasks/{tid}").json()
+    assert task["options"] == {"marker": "keep-me"}, task.get("options")
+
+    # 失败/完成的任务可重试 → 新任务保留 url/options
+    deadline = __import__("time").time() + 30
+    while __import__("time").time() < deadline:
+        st = client.get(f"/api/tasks/{tid}").json()["status"]
+        if st in ("completed", "failed"):
+            break
+        __import__("time").sleep(0.3)
+    client.delete(f"/api/tasks/{tid}")
+    # 用已结束任务验证 retry：重新创建一个并手动走完
+    r2 = client.post("/api/tools/builtin-web-saver/download", json={
+        "url": "https://example.com/options-test-2", "options": {"marker": "retry-me"},
+    })
+    tid2 = r2.json()["task_id"]
+    deadline = __import__("time").time() + 30
+    while __import__("time").time() < deadline:
+        st = client.get(f"/api/tasks/{tid2}").json()["status"]
+        if st in ("completed", "failed"):
+            break
+        __import__("time").sleep(0.3)
+    retry = client.post(f"/api/tasks/{tid2}/retry")
+    assert retry.status_code == 200, retry.text
+    new_id = retry.json()["task_id"]
+    assert new_id != tid2
+    new_task = client.get(f"/api/tasks/{new_id}").json()
+    assert new_task["options"] == {"marker": "retry-me"}
+    assert new_task["url"] == "https://example.com/options-test-2"
+    # 不可重试：running/queued/completed 状态
+    assert client.post(f"/api/tasks/{new_id}/retry").status_code in (400,)
+    for x in (tid2, new_id):
+        deadline = __import__("time").time() + 30
+        while __import__("time").time() < deadline:
+            if client.get(f"/api/tasks/{x}").json()["status"] in ("completed", "failed"):
+                break
+            __import__("time").sleep(0.3)
+        client.delete(f"/api/tasks/{x}")

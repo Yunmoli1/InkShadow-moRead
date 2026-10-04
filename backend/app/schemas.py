@@ -56,6 +56,7 @@ class TaskOut(BaseModel):
     message: str
     dest_type: str
     output_dir: str
+    options: dict = {}
     log_tail: list[str] = []
     created_at: datetime | None = None
     finished_at: datetime | None = None

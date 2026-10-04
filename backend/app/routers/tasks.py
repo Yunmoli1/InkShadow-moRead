@@ -20,6 +20,7 @@ def _task_out(t: DownloadTask) -> TaskOut:
         id=t.id, tool=t.tool, task_type=t.task_type, url=t.url, title=t.title,
         status=t.status, progress=t.progress, speed=t.speed, eta=t.eta,
         message=t.message, dest_type=t.dest_type, output_dir=t.output_dir,
+        options=t.options or {},
         log_tail=t.log_tail or [], created_at=t.created_at, finished_at=t.finished_at,
     )
 
@@ -122,6 +123,16 @@ async def resume_task(task_id: str) -> dict:
     if not ok:
         raise HTTPException(500, "恢复失败")
     return {"id": task_id, "status": "queued", "message": "已恢复（断点续传）"}
+
+
+@router.post("/{task_id}/retry")
+async def retry_task(task_id: str) -> dict:
+    """重试失败/已取消的任务：复制原参数创建新任务（断点续传）。"""
+    new_task = await manager.retry(task_id)
+    if new_task is None:
+        raise HTTPException(400, "任务不存在或状态不可重试（仅失败/已取消可重试）")
+    return {"task_id": new_task.id, "status": new_task.status,
+            "message": "已创建重试任务（原进度可续传）"}
 
 
 @router.delete("/{task_id}")
