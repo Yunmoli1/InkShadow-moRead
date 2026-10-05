@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Database, Download, Globe, HardDrive, KeyRound, Lock, Server, ShieldCheck, Trash2, Upload } from 'lucide-react'
+import { Activity, Database, Download, Globe, HardDrive, KeyRound, Lock, Server, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,10 +23,26 @@ interface StorageStats {
   db_bytes: number
 }
 
+interface Metrics {
+  tasks: {
+    by_status: Record<string, number>
+    total: number
+    completed: number
+    failed: number
+    success_rate: number | null
+    avg_duration_sec: number | null
+    fallback_count: number
+    by_error_code: Record<string, number>
+  }
+  sse: { task_subscriptions: number; global_subscriptions: number }
+  library: { novels: number; chapters: number; notes: number; media: number }
+}
+
 export default function SettingsPage() {
   const { settings, load, save } = useSettings()
   const { theme, toggle } = useTheme()
   const [storage, setStorage] = useState<StorageStats | null>(null)
+  const [metrics, setMetrics] = useState<Metrics | null>(null)
   const [backupPwd, setBackupPwd] = useState('')
   const [needPwd, setNeedPwd] = useState<null | 'export' | 'import'>(null)
   const [pendingFile, setPendingFile] = useState<File | null>(null)
@@ -48,6 +64,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!settings) load()
     api.get<StorageStats>('/api/storage/stats').then(setStorage).catch(() => {})
+    api.get<Metrics>('/api/metrics').then(setMetrics).catch(() => {})
   }, [settings, load])
 
   const patch = async (p: Partial<AppSettings>) => {
@@ -285,6 +302,39 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* 运行指标（A5） */}
+      {metrics && (
+        <Card className="rounded-xl">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><Activity className="size-4 text-primary" /> 最近 30 天运行指标</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <MetricTile label="任务数" value={String(metrics.tasks.total)} />
+              <MetricTile
+                label="成功率"
+                value={metrics.tasks.success_rate === null ? '—' : `${(metrics.tasks.success_rate * 100).toFixed(0)}%`}
+              />
+              <MetricTile
+                label="平均耗时"
+                value={metrics.tasks.avg_duration_sec === null ? '—' : formatDuration(metrics.tasks.avg_duration_sec)}
+              />
+              <MetricTile label="自动换工具" value={String(metrics.tasks.fallback_count)} />
+            </div>
+            {Object.keys(metrics.tasks.by_error_code).length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(metrics.tasks.by_error_code).map(([code, n]) => (
+                  <Badge key={code} tone="outline">{code} × {n}</Badge>
+                ))}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              书库 {metrics.library.novels} 本 · {metrics.library.chapters} 章 · 笔记 {metrics.library.notes} 条 · 媒体 {metrics.library.media} 项
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* 备份与恢复 */}
       <Card className="rounded-xl">
         <CardHeader>
@@ -348,6 +398,21 @@ export default function SettingsPage() {
       </Dialog>
     </div>
   )
+}
+
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border bg-card px-3 py-2">
+      <div className="font-serif text-lg font-semibold">{value}</div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+    </div>
+  )
+}
+
+function formatDuration(sec: number): string {
+  if (sec < 60) return `${sec.toFixed(0)}s`
+  if (sec < 3600) return `${(sec / 60).toFixed(1)}min`
+  return `${(sec / 3600).toFixed(1)}h`
 }
 
 // ---- WebCrypto AES-GCM ----

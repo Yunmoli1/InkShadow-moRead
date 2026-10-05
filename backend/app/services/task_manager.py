@@ -107,6 +107,13 @@ class EventBus:
     def has_subscribers(self, task_id: str) -> bool:
         return bool(self._subs.get(task_id))
 
+    def stats(self) -> dict:
+        """A5 指标：当前 SSE 订阅数（按任务订阅 + 全局订阅）。"""
+        return {
+            "task_subscriptions": sum(len(s) for s in self._subs.values()),
+            "global_subscriptions": len(self._global),
+        }
+
 
 bus = EventBus()
 

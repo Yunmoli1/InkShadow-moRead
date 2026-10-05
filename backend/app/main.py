@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .database import init_db
-from .routers import media, novels, opds, settings, tasks, tools
+from .routers import media, metrics, novels, opds, settings, tasks, tools
 
 
 @asynccontextmanager
@@ -41,9 +41,15 @@ async def lifespan(app: FastAPI):
 
     await sd_notify.ready()
     watchdog_task = sd_notify.start_watchdog()
+    # SQLite 例行维护（每日 checkpoint+VACUUM）；网络盘数据库启动即告警
+    from .services.db_maintenance import maintenance_loop, warn_if_network_path
+
+    warn_if_network_path(config.DB_PATH)
+    maint_task = asyncio.create_task(maintenance_loop())
     yield
     applog.info("MoRead shutting down", extra={"event": "shutdown"})
     updater_task.cancel()
+    maint_task.cancel()
     if watchdog_task:
         watchdog_task.cancel()
 
@@ -68,6 +74,7 @@ app.include_router(tasks.router)
 app.include_router(novels.router)
 app.include_router(media.router)
 app.include_router(settings.router)
+app.include_router(metrics.router)
 app.include_router(opds.router)
 
 
