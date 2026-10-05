@@ -19,6 +19,11 @@ from .routers import media, novels, opds, settings, tasks, tools
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from .services.applog import get_logger, setup_logging
+
+    setup_logging()
+    applog = get_logger("app")
+    applog.info("MoRead starting (data dir: %s)", config.DATA_DIR, extra={"event": "startup"})
     config.ensure_dirs()
     await init_db()
     # 任务接管：排队中的重新入队，运行中的标记中断（可重试）
@@ -32,6 +37,7 @@ async def lifespan(app: FastAPI):
 
     updater_task = asyncio.create_task(auto_loop())
     yield
+    applog.info("MoRead shutting down", extra={"event": "shutdown"})
     updater_task.cancel()
 
 
@@ -87,6 +93,10 @@ async def access_token_guard(request: Request, call_next):
                     except Exception:
                         provided = ""
             if not hmac.compare_digest(provided, token):
+                from .services.applog import get_logger
+
+                get_logger("auth").warning("access denied: invalid or missing token", extra={
+                    "event": "auth-denied", "path": path})
                 return JSONResponse({"detail": "需要访问令牌"}, status_code=401)
     return await call_next(request)
 

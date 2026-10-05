@@ -7,6 +7,7 @@ fanned out to SSE subscribers, and kept in a log tail persisted to DB.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import uuid
@@ -21,12 +22,18 @@ from ..database import SessionLocal
 from ..models import DownloadTask, MediaItem, Novel
 from . import tool_registry
 from . import netenv
+from .applog import get_logger, redact as _redact
 from .novel_parser import import_novel_file
 from .web_saver import save_single_page
 
 MAX_LOG_LINES = 200
 MAX_CONCURRENT_TASKS = 2
 TERMINAL_STATES = {"completed", "failed", "canceled"}
+
+# 总超时：挂死的工具进程不能永远占用并发槽（可用环境变量调整）
+TASK_TIMEOUT_SEC = float(os.environ.get("MOREAD_TASK_TIMEOUT_HOURS", "2")) * 3600
+
+log = get_logger("tasks")
 
 
 class NoContentError(Exception):
@@ -132,6 +139,10 @@ class TaskManager:
             db.add(task)
             await db.commit()
             await db.refresh(task)
+        log.info("task created: %s", task.url, extra={
+            "event": "create", "task_id": task.id, "tool": tool,
+            "dest_type": dest_type, "task_type": task_type,
+        })
         worker = asyncio.create_task(self._run_task(task.id, spec, url, options))
         self._worker_tasks[task.id] = worker
         return task
@@ -139,6 +150,7 @@ class TaskManager:
     # -- control ------------------------------------------------------------
 
     async def pause(self, task_id: str) -> bool:
+        log.info("task pause requested", extra={"event": "pause", "task_id": task_id})
         self.pause_flags.setdefault(task_id, asyncio.Event()).set()
         proc = self.processes.get(task_id)
         if proc and proc.returncode is None:
@@ -158,6 +170,7 @@ class TaskManager:
             options = dict(task.options or {})  # 恢复时还原原始工具参数
         self.pause_flags.pop(task_id, None)
         await self._update_status(task_id, status="queued", message="已恢复排队")
+        log.info("task resumed", extra={"event": "resume", "task_id": task_id})
         worker = asyncio.create_task(self._run_task(task_id, spec, url, options))
         self._worker_tasks[task_id] = worker
         return True
@@ -175,6 +188,8 @@ class TaskManager:
                     t.status = "failed"
                     t.message = "服务重启导致任务中断，可点击重试继续（支持断点续传）"
                     t.finished_at = _now()
+                    log.warning("task interrupted by restart", extra={
+                        "event": "takeover", "task_id": t.id, "tool": t.tool})
                 else:
                     to_run.append((t.id, t.tool, dict(t.options or {})))
             await db.commit()
@@ -203,9 +218,12 @@ class TaskManager:
         new_task = await self.create_task(
             tool=tool, url=url, options=options, dest_type=dest_type, title=title,
         )
+        log.info("task retried", extra={
+            "event": "retry", "task_id": new_task.id, "tool": tool, "prev_task_id": task_id})
         return new_task
 
     async def cancel(self, task_id: str) -> bool:
+        log.info("task cancel requested", extra={"event": "cancel", "task_id": task_id})
         self.cancel_flags.setdefault(task_id, asyncio.Event()).set()
         proc = self.processes.get(task_id)
         if proc and proc.returncode is None:
@@ -234,6 +252,8 @@ class TaskManager:
             except asyncio.CancelledError:
                 pass
             except Exception as exc:  # never crash the app on tool failure
+                log.error("task crashed: %s", exc, exc_info=True, extra={
+                    "event": "crash", "task_id": task_id, "tool": spec.name})
                 await self._update_status(task_id, status="failed", message=f"任务执行异常: {exc}")
                 await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
 
@@ -249,6 +269,8 @@ class TaskManager:
         if nxt is None:
             return False
         remaining = [s for s in _fallback if s is not nxt]
+        log.warning("fallback switch: %s -> %s (%s)", spec.display, nxt.display, reason, extra={
+            "event": "fallback", "task_id": task_id, "tool": nxt.name})
         log_tail.append(f"--- {reason}，自动切换工具: {nxt.display} ---")
         await self._update_status(
             task_id, message=f"{reason}，自动切换到 {nxt.display} 重试…",
@@ -297,6 +319,8 @@ class TaskManager:
 
         exe = tool_registry.resolve_executable(spec)
         if exe is None:
+            log.error("tool not installed: %s", spec.display, extra={
+                "event": "tool-missing", "task_id": task_id, "tool": spec.name})
             if await self._switch_and_retry(
                 task_id, spec, url, options, log_tail,
                 f"工具 {spec.display} 未安装", _fallback,
@@ -394,6 +418,8 @@ class TaskManager:
             return
 
         self.processes[task_id] = proc
+        log.info("tool started: %s", _redact(" ".join(argv)), extra={
+            "event": "spawn", "task_id": task_id, "tool": spec.name})
         progress = 0.0
         speed = eta = ""
         files_seen = 0
@@ -415,6 +441,8 @@ class TaskManager:
             try:
                 raw = await asyncio.wait_for(proc.stdout.read(1024), timeout=STALL_TIMEOUT)
             except asyncio.TimeoutError:
+                log.error("tool stalled %ds, terminating", STALL_TIMEOUT, extra={
+                    "event": "stall", "task_id": task_id, "tool": spec.name})
                 log_tail.append(f"[watchdog] 工具已 {STALL_TIMEOUT}s 无任何输出，判定卡死并终止")
                 await self._terminate(proc)
                 rc = await proc.wait()
@@ -461,15 +489,25 @@ class TaskManager:
         _fallback: list[tool_registry.ToolSpec] | None, note: str = "", progress: float = 0.0,
     ) -> None:
         prefix = f"{note}；" if note else ""
+        duration_ms: int | None = None
         async with SessionLocal() as db:
             task = await db.get(DownloadTask, task_id)
             task.log_tail = list(log_tail)[-MAX_LOG_LINES:]  # type: ignore[assignment]
+            if task is not None and task.started_at:
+                duration_ms = int((_now() - task.started_at).total_seconds() * 1000)
             await db.commit()
 
+        def _outcome(level: int, msg: str, *args, **extra) -> None:
+            log.log(level, msg, *args, extra={
+                "event": "finish", "task_id": task_id, "tool": spec.name,
+                "rc": rc, "duration_ms": duration_ms, **extra})
+
         if canceled:
+            _outcome(logging.INFO, "task canceled")
             await self._update_status(task_id, status="canceled", message="已取消")
             await bus.publish(task_id, {"task_id": task_id, "status": "canceled"})
         elif paused:
+            _outcome(logging.INFO, "task paused at %.0f%%", progress)
             await self._update_status(
                 task_id, status="paused", progress=progress,
                 message=f"已暂停于 {progress:.0f}%（断点续传可用）",
@@ -483,12 +521,14 @@ class TaskManager:
                     task_id, spec, url, options, log_tail, str(exc), _fallback or [],
                 ):
                     return
+                _outcome(logging.WARNING, "task failed: no content")
                 await self._update_status(
                     task_id, status="failed", message=f"{prefix}{exc}",
                     log_lines=list(log_tail)[-MAX_LOG_LINES:],
                 )
                 await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": "no-content"})
                 return
+            _outcome(logging.INFO, "task completed imported=%d", imported)
             await self._update_status(
                 task_id, status="completed", progress=100.0,
                 message=f"下载完成，已导入 {imported} 项资源",
@@ -501,6 +541,9 @@ class TaskManager:
                 f"工具 {spec.display} 失败（退出码 {rc}）", _fallback or [],
             ):
                 return
+            _outcome(logging.WARNING, "task failed with exit code %d", rc)
+            log.warning("failure tail: %s", _redact(tail), extra={
+                "event": "failure-tail", "task_id": task_id, "tool": spec.name})
             await self._update_status(
                 task_id, status="failed", message=f"{prefix}工具退出码 {rc}。最近日志：{tail[-400:]}",
             )
