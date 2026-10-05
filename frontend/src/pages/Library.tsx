@@ -45,6 +45,8 @@ export default function Library() {
 
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
+  const [tagList, setTagList] = useState<{ tag: string; count: number }[]>([])
+  const [activeTag, setActiveTag] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -52,6 +54,7 @@ export default function Library() {
       const data = await api.get<{ items: Media[]; total: number }>('/api/media', {
         media_type: type === '全部' ? undefined : type,
         search: search || undefined,
+        tag: activeTag || undefined,
         page, page_size: 24,
       })
       setItems(data.items)
@@ -63,7 +66,10 @@ export default function Library() {
     }
   }
 
-  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [type, page])
+  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [type, page, activeTag])
+  useEffect(() => {
+    api.get<{ tag: string; count: number }[]>('/api/media/tag-list').then(setTagList).catch(() => {})
+  }, [])
 
   const onSearch = (v: string) => {
     setSearch(v)
@@ -153,6 +159,29 @@ export default function Library() {
           </button>
         ))}
       </div>
+
+      {/* 标签筛选（AI 标签） */}
+      {tagList.length > 0 && (
+        <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
+          {activeTag && (
+            <button
+              onClick={() => { setPage(1); setActiveTag('') }}
+              className="h-8 shrink-0 rounded-full bg-primary px-3 text-xs text-primary-foreground"
+            >
+              {activeTag} ✕
+            </button>
+          )}
+          {tagList.filter((t) => t.tag !== activeTag).map((t) => (
+            <button
+              key={t.tag}
+              onClick={() => { setPage(1); setActiveTag(t.tag) }}
+              className="h-8 shrink-0 rounded-full bg-secondary px-3 text-xs text-secondary-foreground transition-colors hover:bg-accent"
+            >
+              #{t.tag} <span className="opacity-60">{t.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {loading ? (
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">

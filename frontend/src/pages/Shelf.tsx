@@ -46,12 +46,14 @@ export default function Shelf() {
 
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
+  const [tagList, setTagList] = useState<{ tag: string; count: number }[]>([])
+  const [activeTag, setActiveTag] = useState('')
 
   const load = async () => {
     setLoading(true)
     try {
       const data = await api.get<{ items: Novel[]; total: number }>('/api/novels', {
-        page, page_size: 24, search: search || undefined,
+        page, page_size: 24, search: search || undefined, tag: activeTag || undefined,
       })
       setNovels(data.items)
       setTotal(data.total)
@@ -62,7 +64,10 @@ export default function Shelf() {
     }
   }
 
-  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [page])
+  useEffect(() => { load() /* eslint-disable-line react-hooks/exhaustive-deps */ }, [page, activeTag])
+  useEffect(() => {
+    api.get<{ tag: string; count: number }[]>('/api/novels/tag-list').then(setTagList).catch(() => {})
+  }, [])
 
   const onSearch = (v: string) => {
     setSearch(v)
@@ -158,6 +163,29 @@ export default function Shelf() {
           </Button>
         </div>
       </div>
+
+      {/* 标签筛选（AI 标签） */}
+      {tagList.length > 0 && (
+        <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
+          {activeTag && (
+            <button
+              onClick={() => { setPage(1); setActiveTag('') }}
+              className="h-8 shrink-0 rounded-full bg-primary px-3 text-xs text-primary-foreground"
+            >
+              {activeTag} ✕
+            </button>
+          )}
+          {tagList.filter((t) => t.tag !== activeTag).map((t) => (
+            <button
+              key={t.tag}
+              onClick={() => { setPage(1); setActiveTag(t.tag) }}
+              className="h-8 shrink-0 rounded-full bg-secondary px-3 text-xs text-secondary-foreground transition-colors hover:bg-accent"
+            >
+              #{t.tag} <span className="opacity-60">{t.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Web Worker 解析预览 */}
       {previews.length > 0 && (

@@ -1,6 +1,7 @@
 """Media endpoints: list / detail / file serving (Range) / delete / batch import."""
 
 import asyncio
+import json
 import mimetypes
 import re
 import urllib.parse
@@ -41,7 +42,7 @@ def _media_out(m: MediaItem) -> MediaOut:
 async def list_media(
     page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100),
     media_type: str | None = Query(None, description="image/video/audio/page/doc"),
-    search: str | None = None,
+    search: str | None = None, tag: str | None = None,
 ) -> dict:
     async with SessionLocal() as db:
         q = select(MediaItem)
@@ -54,12 +55,32 @@ async def list_media(
             cond = MediaItem.title.contains(search) | MediaItem.source_url.contains(search)
             q = q.where(cond)
             count_q = count_q.where(cond)
+        if tag:
+            # tags 是 JSON 数组；用 json.dumps(tag) 生成带引号的转义串做 LIKE
+            needle = json.dumps(tag.replace('"', ""))
+            cond = MediaItem.tags.like(f"%{needle}%")
+            q = q.where(cond)
+            count_q = count_q.where(cond)
         total = (await db.execute(count_q)).scalar() or 0
         rows = (await db.execute(
             q.order_by(MediaItem.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
         )).scalars().all()
         return {"items": [_media_out(m) for m in rows], "total": total,
                 "page": page, "page_size": page_size}
+
+
+@router.get("/tag-list")
+async def media_tag_list() -> list[dict]:
+    """全部标签及数量（B1 标签筛选数据源）。"""
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(MediaItem.tags))).scalars().all()
+    counter: dict[str, int] = {}
+    for tags in rows:
+        for t in tags or []:
+            if isinstance(t, str) and t:
+                counter[t] = counter.get(t, 0) + 1
+    return [{"tag": t, "count": c} for t, c in
+            sorted(counter.items(), key=lambda kv: -kv[1])[:50]]
 
 
 @router.post("/batch-import", response_model=dict, status_code=201)

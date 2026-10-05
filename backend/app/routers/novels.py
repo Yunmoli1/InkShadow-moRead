@@ -79,7 +79,7 @@ async def reading_stats() -> dict:
 @router.get("")
 async def list_novels(
     page: int = Query(1, ge=1), page_size: int = Query(24, ge=1, le=100),
-    search: str | None = None, category: str | None = None,
+    search: str | None = None, category: str | None = None, tag: str | None = None,
 ) -> dict:
     async with SessionLocal() as db:
         q = select(Novel)
@@ -92,12 +92,33 @@ async def list_novels(
         if category and category != "全部":
             q = q.where(Novel.category == category)
             count_q = count_q.where(Novel.category == category)
+        if tag:
+            # tags 是 JSON 数组；SQLAlchemy 默认 ensure_ascii 序列化（中文存为 \uXXXX），
+            # 用 json.dumps(tag) 生成带引号的转义串做 LIKE，兼容任意字符
+            needle = json.dumps(tag.replace('"', ""))
+            cond = Novel.tags.like(f"%{needle}%")
+            q = q.where(cond)
+            count_q = count_q.where(cond)
         total = (await db.execute(count_q)).scalar() or 0
         rows = (await db.execute(
             q.order_by(Novel.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
         )).scalars().all()
         return {"items": [_novel_out(n) for n in rows], "total": total,
                 "page": page, "page_size": page_size}
+
+
+@router.get("/tag-list")
+async def novel_tag_list() -> list[dict]:
+    """全部标签及数量（B1 标签筛选数据源）。"""
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(Novel.tags))).scalars().all()
+    counter: dict[str, int] = {}
+    for tags in rows:
+        for t in tags or []:
+            if isinstance(t, str) and t:
+                counter[t] = counter.get(t, 0) + 1
+    return [{"tag": t, "count": c} for t, c in
+            sorted(counter.items(), key=lambda kv: -kv[1])[:50]]
 
 
 @router.post("/import", response_model=ImportResult)
