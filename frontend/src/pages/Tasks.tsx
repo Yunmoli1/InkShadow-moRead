@@ -17,7 +17,36 @@ interface Task {
   speed: string
   eta: string
   message: string
+  error_code?: string
+  retry_count?: number
   created_at?: string
+}
+
+// A2 错误分类码：与 backend/app/services/error_codes.py 保持一致
+const ERROR_LABELS: Record<string, string> = {
+  TOOL_NOT_FOUND: '工具未安装',
+  SPAWN_ERROR: '工具启动失败',
+  NETWORK_ERROR: '网络错误',
+  AUTH_REQUIRED: '站点需要登录',
+  NO_CONTENT: '未获取到有效内容',
+  TIMEOUT: '任务超时',
+  QUOTA_EXCEEDED: '存储配额不足',
+  IMPORT_ERROR: '导入失败',
+  INTERNAL_ERROR: '内部错误',
+  UNKNOWN: '未知错误',
+}
+
+const ERROR_SUGGESTIONS: Record<string, string> = {
+  TOOL_NOT_FOUND: '到工具箱按提示安装该工具，或指定其他工具重试',
+  SPAWN_ERROR: '在工具箱重新检测版本或重装该工具后重试',
+  NETWORK_ERROR: '检查本机网络，或在设置中配置代理后重试',
+  AUTH_REQUIRED: '该站点可能需要登录，可尝试一键换源',
+  NO_CONTENT: '站点可能不支持，试试「一键换源」或更换工具',
+  TIMEOUT: '任务超时被终止，可重试；反复超时请更换工具',
+  QUOTA_EXCEEDED: '清理存储空间或调大存储配额',
+  IMPORT_ERROR: '产物可能损坏，查看任务日志或重试',
+  INTERNAL_ERROR: '查看 data/logs/moread.log 定位原因',
+  UNKNOWN: '查看任务日志中的最近输出定位原因',
 }
 
 const STATUS_TABS = [
@@ -172,8 +201,23 @@ export default function Tasks() {
                       {STATUS_TABS.find((s) => s.value === t.status)?.label ?? t.status}
                     </Badge>
                     <Badge tone="outline">{t.tool}</Badge>
+                    {(t.retry_count ?? 0) > 0 && (
+                      <Badge tone="outline">重试 {t.retry_count} 次</Badge>
+                    )}
                   </div>
                   <p className="mt-0.5 truncate text-xs text-muted-foreground">{t.message || t.url}</p>
+                  {t.status === 'failed' && t.error_code && (
+                    <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+                      <span className="font-medium text-destructive">
+                        {ERROR_LABELS[t.error_code] ?? t.error_code}
+                      </span>
+                      <span className="mx-1.5 text-muted-foreground/50">·</span>
+                      <span className="text-muted-foreground">
+                        {ERROR_SUGGESTIONS[t.error_code] ?? '查看任务日志定位原因'}
+                      </span>
+                      <code className="ml-2 rounded bg-muted px-1 py-0.5 text-[10px]">{t.error_code}</code>
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
                   {(t.status === 'running' || t.status === 'queued') && (

@@ -21,7 +21,9 @@ def _task_out(t: DownloadTask) -> TaskOut:
         status=t.status, progress=t.progress, speed=t.speed, eta=t.eta,
         message=t.message, dest_type=t.dest_type, output_dir=t.output_dir,
         options=t.options or {},
-        log_tail=t.log_tail or [], created_at=t.created_at, finished_at=t.finished_at,
+        log_tail=t.log_tail or [], error_code=t.error_code or "",
+        retry_count=t.retry_count or 0,
+        created_at=t.created_at, started_at=t.started_at, finished_at=t.finished_at,
     )
 
 

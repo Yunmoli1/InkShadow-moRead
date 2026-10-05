@@ -58,7 +58,10 @@ class TaskOut(BaseModel):
     output_dir: str
     options: dict = {}
     log_tail: list[str] = []
+    error_code: str = ""
+    retry_count: int = 0
     created_at: datetime | None = None
+    started_at: datetime | None = None
     finished_at: datetime | None = None
 
 

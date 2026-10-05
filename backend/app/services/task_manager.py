@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from ..models import DownloadTask, MediaItem, Novel
 from . import tool_registry
 from . import netenv
 from .applog import get_logger, redact as _redact
+from .error_codes import classify_failure, classify_text
 from .novel_parser import import_novel_file
 from .web_saver import save_single_page
 
@@ -121,7 +123,7 @@ class TaskManager:
 
     async def create_task(
         self, tool: str, url: str, options: dict | None = None, dest_type: str = "media",
-        title: str = "", task_type: str = "download",
+        title: str = "", task_type: str = "download", retry_count: int = 0,
     ) -> DownloadTask:
         spec = tool_registry.get_spec(tool)
         if spec is None:
@@ -133,7 +135,7 @@ class TaskManager:
         task = DownloadTask(
             tool=tool, task_type=task_type, url=url, title=title or url,
             status="queued", output_dir=out_dir, dest_type=dest_type,
-            options=options,
+            options=options, retry_count=retry_count,
         )
         async with SessionLocal() as db:
             db.add(task)
@@ -187,6 +189,7 @@ class TaskManager:
                 if t.status == "running":
                     t.status = "failed"
                     t.message = "服务重启导致任务中断，可点击重试继续（支持断点续传）"
+                    t.error_code = "INTERNAL_ERROR"
                     t.finished_at = _now()
                     log.warning("task interrupted by restart", extra={
                         "event": "takeover", "task_id": t.id, "tool": t.tool})
@@ -215,10 +218,12 @@ class TaskManager:
             options = dict(task.options or {})
             dest_type = task.dest_type
             title = task.title
+            retry_depth = (task.retry_count or 0) + 1
         new_task = await self.create_task(
             tool=tool, url=url, options=options, dest_type=dest_type, title=title,
+            retry_count=retry_depth,
         )
-        log.info("task retried", extra={
+        log.info("task retried (chain depth %d)", retry_depth, extra={
             "event": "retry", "task_id": new_task.id, "tool": tool, "prev_task_id": task_id})
         return new_task
 
@@ -254,7 +259,8 @@ class TaskManager:
             except Exception as exc:  # never crash the app on tool failure
                 log.error("task crashed: %s", exc, exc_info=True, extra={
                     "event": "crash", "task_id": task_id, "tool": spec.name})
-                await self._update_status(task_id, status="failed", message=f"任务执行异常: {exc}")
+                await self._update_status(task_id, status="failed", message=f"任务执行异常: {exc}",
+                                          error_code="INTERNAL_ERROR")
                 await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
 
     async def _switch_and_retry(
@@ -329,6 +335,7 @@ class TaskManager:
             await self._update_status(
                 task_id, status="failed",
                 message=f"工具 {spec.display} 未安装。请先安装：{spec.install_hint}",
+                error_code="TOOL_NOT_FOUND",
             )
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": "tool-not-installed"})
             return
@@ -413,6 +420,7 @@ class TaskManager:
                 task_id, status="failed",
                 message=f"无法启动工具进程: {exc}",
                 log_lines=list(log_tail)[-MAX_LOG_LINES:],
+                error_code="SPAWN_ERROR",
             )
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
             return
@@ -435,9 +443,20 @@ class TaskManager:
 
         assert proc.stdout is not None
         STALL_TIMEOUT = 300  # a tool printing nothing for 5 min is considered hung
+        deadline = time.monotonic() + TASK_TIMEOUT_SEC  # 总超时：防止挂死进程永久占用并发槽
         while True:
             if task_id in self.cancel_flags:
                 break
+            if time.monotonic() > deadline:
+                log.error("task exceeded total timeout (%.0fs), terminating", TASK_TIMEOUT_SEC, extra={
+                    "event": "timeout", "task_id": task_id, "tool": spec.name})
+                log_tail.append(f"[watchdog] 任务总时长超过 {TASK_TIMEOUT_SEC / 3600:.1f}h，判定超时并终止")
+                await self._terminate(proc)
+                rc = await proc.wait()
+                self.processes.pop(task_id, None)
+                await self._finish(task_id, spec, url, options, out_dir, log_tail, rc, False, False, _fallback,
+                                   note="任务总时长超限，已被自动终止", progress=progress, error_code="TIMEOUT")
+                return
             try:
                 raw = await asyncio.wait_for(proc.stdout.read(1024), timeout=STALL_TIMEOUT)
             except asyncio.TimeoutError:
@@ -450,7 +469,7 @@ class TaskManager:
                 canceled = task_id in self.cancel_flags
                 paused = False
                 await self._finish(task_id, spec, url, options, out_dir, log_tail, rc, canceled, False, _fallback,
-                                   note="工具卡死无输出，已被自动终止", progress=progress)
+                                   note="工具卡死无输出，已被自动终止", progress=progress, error_code="TIMEOUT")
                 return
             if not raw:
                 break
@@ -487,6 +506,7 @@ class TaskManager:
         self, task_id: str, spec: tool_registry.ToolSpec, url: str, options: dict,
         out_dir: str, log_tail: deque, rc: int, canceled: bool, paused: bool,
         _fallback: list[tool_registry.ToolSpec] | None, note: str = "", progress: float = 0.0,
+        error_code: str = "",
     ) -> None:
         prefix = f"{note}；" if note else ""
         duration_ms: int | None = None
@@ -525,6 +545,7 @@ class TaskManager:
                 await self._update_status(
                     task_id, status="failed", message=f"{prefix}{exc}",
                     log_lines=list(log_tail)[-MAX_LOG_LINES:],
+                    error_code=error_code or "NO_CONTENT",
                 )
                 await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": "no-content"})
                 return
@@ -546,6 +567,7 @@ class TaskManager:
                 "event": "failure-tail", "task_id": task_id, "tool": spec.name})
             await self._update_status(
                 task_id, status="failed", message=f"{prefix}工具退出码 {rc}。最近日志：{tail[-400:]}",
+                error_code=error_code or classify_failure(rc, tail),
             )
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": f"exit code {rc}"})
 
@@ -571,6 +593,7 @@ class TaskManager:
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         done = ok = 0
+        last_error = ""
 
         async def fetch_one(client: httpx.AsyncClient, u: str) -> None:
             nonlocal ok
@@ -599,6 +622,7 @@ class TaskManager:
                     try:
                         await fetch_one(client, u)
                     except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
                         log_tail.append(f"FAILED: {u} ({exc})")
                     await self._update_status(
                         task_id, progress=round((i + 1) / total * 90, 1),
@@ -612,7 +636,8 @@ class TaskManager:
                 await bus.publish(task_id, {"task_id": task_id, "status": "canceled"})
                 return
             if ok == 0:
-                raise RuntimeError("所有文件均下载失败")
+                # 带上最后一次的具体错误，供错误分类器识别（如网络错误）
+                raise RuntimeError(f"所有文件均下载失败（{last_error or '未知原因'}）")
             imported = await self._post_process(task_id, tool_registry.get_spec("item-fetch"), url, out_dir)
             await self._update_status(task_id, status="completed", progress=100.0,
                                       message=f"下载完成（{ok}/{total}），已导入 {imported} 项")
@@ -620,7 +645,8 @@ class TaskManager:
                                         "progress": 100.0, "imported": imported})
         except Exception as exc:
             await self._update_status(task_id, status="failed", message=f"文件下载失败: {exc}",
-                                      log_lines=list(log_tail)[-MAX_LOG_LINES:])
+                                      log_lines=list(log_tail)[-MAX_LOG_LINES:],
+                                      error_code=classify_text(str(exc)))
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
         finally:
             self.cancel_flags.pop(task_id, None)
@@ -658,7 +684,8 @@ class TaskManager:
                 f"网页转小说失败: {exc}", [],
             ):
                 return
-            await self._update_status(task_id, status="failed", message=f"网页转小说失败: {exc}")
+            await self._update_status(task_id, status="failed", message=f"网页转小说失败: {exc}",
+                                      error_code=classify_text(f"{exc}"))
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
         finally:
             self.cancel_flags.pop(task_id, None)
@@ -689,7 +716,8 @@ class TaskManager:
                                           message=f"归档完成，导入 {imported} 项")
                 await bus.publish(task_id, {"task_id": task_id, "status": "completed", "progress": 100.0})
         except Exception as exc:
-            await self._update_status(task_id, status="failed", message=f"网页保存失败: {exc}")
+            await self._update_status(task_id, status="failed", message=f"网页保存失败: {exc}",
+                                      error_code=classify_text(str(exc)))
             await bus.publish(task_id, {"task_id": task_id, "status": "failed", "error": str(exc)})
         finally:
             self.cancel_flags.pop(task_id, None)

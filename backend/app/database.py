@@ -53,6 +53,8 @@ async def init_db() -> None:
 
         migrations = [
             "ALTER TABLE tasks ADD COLUMN options JSON",
+            "ALTER TABLE tasks ADD COLUMN error_code VARCHAR(32)",
+            "ALTER TABLE tasks ADD COLUMN retry_count INTEGER",
             "ALTER TABLE novels ADD COLUMN subscribed BOOLEAN",
             "ALTER TABLE novels ADD COLUMN new_chapters INTEGER",
             "ALTER TABLE novels ADD COLUMN last_check_chapters INTEGER",

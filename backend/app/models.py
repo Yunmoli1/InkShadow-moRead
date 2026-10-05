@@ -118,6 +118,8 @@ class DownloadTask(Base):
     options: Mapped[dict] = mapped_column(JSON, default=dict)    # 工具参数（暂停/恢复/重试需保留）
     dest_type: Mapped[str] = mapped_column(String(16), default="media")  # media / novel
     log_tail: Mapped[list] = mapped_column(JSON, default=list)   # last N log lines
+    error_code: Mapped[str] = mapped_column(String(32), default="")  # A2 错误分类码
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)  # 重试链深度
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
