@@ -36,9 +36,16 @@ async def lifespan(app: FastAPI):
     from .services.updater import auto_loop
 
     updater_task = asyncio.create_task(auto_loop())
+    # systemd watchdog（仅 NOTIFY_SOCKET 存在时生效）
+    from .services import sd_notify
+
+    await sd_notify.ready()
+    watchdog_task = sd_notify.start_watchdog()
     yield
     applog.info("MoRead shutting down", extra={"event": "shutdown"})
     updater_task.cancel()
+    if watchdog_task:
+        watchdog_task.cancel()
 
 
 app = FastAPI(
@@ -73,7 +80,8 @@ from .services.token_guard import current_token as _current_token
 @app.middleware("http")
 async def access_token_guard(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/api/") and path != "/api/health":
+    # 探针端点免令牌（liveness/readiness 需要被编排层直接访问）
+    if path.startswith("/api/") and path not in ("/api/health", "/api/health/ready"):
         token = await _current_token()
         if token:
             provided = (
@@ -103,7 +111,46 @@ async def access_token_guard(request: Request, call_next):
 
 @app.get("/api/health", tags=["meta"])
 async def health() -> dict:
+    """Liveness：进程活着即可响应，不检查任何依赖。"""
     return {"status": "ok", "app": "MoRead", "version": "1.0.0"}
+
+
+@app.get("/api/health/ready", tags=["meta"])
+async def health_ready() -> JSONResponse:
+    """Readiness：DB 可查询 + 数据目录可写。不可用时返回 503（编排层据此摘流量）。
+
+    注意：本端点固定免令牌，便于探针/负载均衡器调用。
+    """
+    checks: dict[str, bool] = {}
+
+    # DB 可查询
+    try:
+        from .database import SessionLocal
+        from sqlalchemy import text
+
+        async with SessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception as exc:
+        from .services.applog import get_logger
+
+        get_logger("health").error("readiness: database check failed: %s", exc)
+        checks["database"] = False
+
+    # 数据目录可写
+    try:
+        probe = config.DATA_DIR / ".readiness-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        checks["data_dir"] = True
+    except OSError:
+        checks["data_dir"] = False
+
+    ok = all(checks.values())
+    return JSONResponse(
+        {"status": "ok" if ok else "unavailable", "checks": checks},
+        status_code=200 if ok else 503,
+    )
 
 
 # --- serve frontend build (single-binary deployment) -----------------------

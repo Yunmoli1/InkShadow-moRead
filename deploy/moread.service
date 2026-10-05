@@ -1,0 +1,39 @@
+# 墨读 MoRead systemd 单元模板（Linux 部署，A3）
+# 安装：
+#   sudo cp deploy/moread.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now moread
+#
+# 说明：
+#   - Restart=on-failure：异常退出自动重启（canceled 除外）
+#   - WatchdogSec=30 + sd_notify：后端内置 watchdog 心跳（app/services/sd_notify.py），
+#     应用挂死（事件循环阻塞）时 systemd 会在 30s 内强杀并重启
+#   - Type=notify：与 sd_notify READY=1 配合，启动完成才算 active
+#   - ProtectSystem/PrivateTmp：基础加固；数据目录按实际路径调整
+
+[Unit]
+Description=MoRead personal local knowledge base
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# 按实际部署修改：用户、目录、Python 环境
+User=%i
+WorkingDirectory=/opt/moread/backend
+Environment="PATH=/opt/moread/backend/.venv/bin:/usr/bin"
+Environment="MOREAD_DATA_DIR=/var/lib/moread"
+ExecStart=/opt/moread/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8686
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+
+# 基础加固
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/moread
+
+[Install]
+WantedBy=multi-user.target
