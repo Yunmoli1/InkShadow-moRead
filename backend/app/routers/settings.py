@@ -289,18 +289,40 @@ async def backup_import(request_bytes: dict) -> dict:
 async def global_search(q: str) -> SearchAllOut:
     if not q.strip():
         return SearchAllOut(novels=[], media=[])
+    qs = q.strip()
     async with SessionLocal() as db:
-        like = f"%{q.strip()}%"
+        like = f"%{qs}%"
         novels = (await db.execute(
             select(Novel).where(or_(Novel.title.like(like), Novel.author.like(like))).limit(10)
         )).scalars().all()
         media = (await db.execute(
             select(MediaItem).where(or_(MediaItem.title.like(like), MediaItem.source_url.like(like))).limit(10)
         )).scalars().all()
-        chapters = (await db.execute(
+        # 章节命中：标题 LIKE 始终执行；FTS 可用时补充正文命中（B4）
+        chapters: list = []
+        seen_novels: set[str] = set()
+        from ..services import fts as fts_svc
+
+        match = fts_svc.match_query(qs) if fts_svc.fts_available() else None
+        if match:
+            from sqlalchemy import text
+
+            fts_rows = (await db.execute(text(
+                f"SELECT c.novel_id AS nid, COUNT(*) AS cnt "
+                f"FROM {fts_svc.FTS_TABLE} JOIN chapters c ON c.id = {fts_svc.FTS_TABLE}.chapter_id "
+                f"WHERE {fts_svc.FTS_TABLE} MATCH :m GROUP BY c.novel_id ORDER BY cnt DESC LIMIT 5"
+            ), {"m": match})).all()
+            chapters = list(fts_rows)
+            seen_novels = {r[0] for r in chapters}
+        title_rows = (await db.execute(
             select(Chapter.novel_id, func.count(Chapter.id))
             .where(Chapter.title.like(like)).group_by(Chapter.novel_id).limit(5)
         )).all()
+        for nid, cnt in title_rows:
+            if nid not in seen_novels:
+                chapters.append((nid, cnt))
+            if len(chapters) >= 10:
+                break
     return SearchAllOut(
         novels=[{"id": n.id, "type": "novel", "title": n.title, "author": n.author} for n in novels]
         + [{"id": nid, "type": "chapter", "title": f"{cnt} 个匹配章节"} for nid, cnt in chapters],

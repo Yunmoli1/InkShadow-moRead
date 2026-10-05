@@ -258,10 +258,29 @@ async def chapter_content(novel_id: str, chapter_id: str) -> ChapterContentOut:
 
 @router.get("/{novel_id}/search")
 async def search_in_novel(novel_id: str, q: str = Query(..., min_length=1, max_length=100)) -> dict:
-    """书内全文搜索：标题与正文（含磁盘文件章节），返回带上下文片段的命中。"""
+    """书内全文搜索：FTS5 优先（万章级 <100ms），短查询/无 FTS 回退 LIKE 扫描。
+
+    返回带上下文片段的命中，接口格式与旧实现一致。
+    """
     ql = q.strip().lower()
     if not ql:
         return {"query": q, "results": []}
+    from ..services import fts as fts_svc
+
+    if fts_svc.fts_available():
+        match = fts_svc.match_query(q)
+        if match:
+            async with SessionLocal() as db:
+                novel = await db.get(Novel, novel_id)
+                if novel is None:
+                    raise HTTPException(404, "小说不存在")
+                real_count = (await db.execute(
+                    select(func.count(Chapter.id)).where(Chapter.novel_id == novel_id)
+                )).scalar() or 0
+            await fts_svc.ensure_indexed(novel_id, real_count, novel.updated_at)
+            results = await fts_svc.fts_search(novel_id, match, q, limit=50)
+            return {"query": q, "results": results, "truncated": len(results) >= 50}
+    # 回退路径：逐章 LIKE 扫描（含磁盘文件章节）
     async with SessionLocal() as db:
         if await db.get(Novel, novel_id) is None:
             raise HTTPException(404, "小说不存在")
