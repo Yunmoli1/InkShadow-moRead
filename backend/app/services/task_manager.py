@@ -739,9 +739,14 @@ class TaskManager:
                 async with SessionLocal() as db:
                     task = await db.get(DownloadTask, task_id)
                     started = task.started_at if task else None
+                    switch_novel_id = str((task.options or {}).get("switch_novel_id") or "") if task else ""
                 await self._harvest_lncrawl_artifacts(task_id, out_dir, started)
                 from .novel_parser import import_lncrawl_output
-                novel = await import_lncrawl_output(base, source_url=url)
+                novel = await import_lncrawl_output(
+                    base, source_url=url,
+                    switch_novel_id=switch_novel_id or None,
+                    force_rebuild=bool(switch_novel_id),
+                )
                 if novel is not None:
                     return 1
             for f in sorted(base.rglob("*")):

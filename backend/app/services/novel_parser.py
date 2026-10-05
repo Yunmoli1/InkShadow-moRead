@@ -344,8 +344,14 @@ def find_local_novel_files(directory: Path) -> list[Path]:
     return [p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in (".txt", ".epub")]
 
 
-async def import_lncrawl_output(out_dir: Path, source_url: str = "") -> Novel | None:
-    """Import a lncrawl 4.x output dir (meta.txt + numbered chapter txts + cover.jpg)."""
+async def import_lncrawl_output(
+    out_dir: Path, source_url: str = "",
+    switch_novel_id: str | None = None, force_rebuild: bool = False,
+) -> Novel | None:
+    """Import a lncrawl 4.x output dir (meta.txt + numbered chapter txts + cover.jpg).
+
+    switch_novel_id: 换源模式——强制匹配指定书（不按标题查重），重建章节并更新来源；
+    force_rebuild: 即使章节数相同也重建（换源内容可能修复缺章）。"""
     meta_file = None
     for cand in out_dir.rglob("meta.txt"):
         meta_file = cand
@@ -368,21 +374,31 @@ async def import_lncrawl_output(out_dir: Path, source_url: str = "") -> Novel | 
     chapter_files.sort(key=lambda p: (int(p.stem),))
 
     async with SessionLocal() as db:
-        exists = await db.scalar(select(Novel).where(Novel.title == title, Novel.author == author))
-        if exists and exists.total_chapters == len(chapter_files):
-            # idempotent re-import: still backfill missing cover
-            cover_src = meta_file.parent / "cover.jpg"
-            if exists.cover_path == "" and cover_src.exists():
-                cover_dir = config.COVERS_DIR / exists.id
-                cover_dir.mkdir(parents=True, exist_ok=True)
-                dest = cover_dir / "cover.jpg"
-                dest.write_bytes(cover_src.read_bytes())
-                exists.cover_path = dest.relative_to(config.DATA_DIR).as_posix()
-                await db.commit()
-            return exists
+        if switch_novel_id:
+            exists = await db.get(Novel, switch_novel_id)
+        else:
+            exists = await db.scalar(select(Novel).where(Novel.title == title, Novel.author == author))
         is_rebuild = False
         if exists:
-            # 追更：新抓取的章节数多于已存 → 重建章节并标记新章数
+            needs_rebuild = (
+                force_rebuild
+                or switch_novel_id is not None
+                or (exists.total_chapters or 0) != len(chapter_files)
+            )
+            if not needs_rebuild:
+                # idempotent re-import: 补封面；换源场景同步来源 URL
+                cover_src = meta_file.parent / "cover.jpg"
+                if exists.cover_path == "" and cover_src.exists():
+                    cover_dir = config.COVERS_DIR / exists.id
+                    cover_dir.mkdir(parents=True, exist_ok=True)
+                    dest = cover_dir / "cover.jpg"
+                    dest.write_bytes(cover_src.read_bytes())
+                    exists.cover_path = dest.relative_to(config.DATA_DIR).as_posix()
+                if switch_novel_id and source_url and exists.source_url != source_url:
+                    exists.source_url = source_url
+                await db.commit()
+                return exists
+            # 追更/换源：重建章节
             is_rebuild = True
             novel = exists
             await db.execute(delete(Chapter).where(Chapter.novel_id == novel.id))
@@ -390,7 +406,9 @@ async def import_lncrawl_output(out_dir: Path, source_url: str = "") -> Novel | 
             shutil.rmtree(novel_dir, ignore_errors=True)
             old_total = novel.total_chapters or 0
             novel.total_chapters = len(chapter_files)
-            if novel.subscribed and len(chapter_files) > old_total:
+            if switch_novel_id and source_url:
+                novel.source_url = source_url  # 换源：更新来源，不累计新章
+            elif novel.subscribed and len(chapter_files) > old_total:
                 novel.new_chapters = (novel.new_chapters or 0) + (len(chapter_files) - old_total)
         if not is_rebuild:
             novel = Novel(

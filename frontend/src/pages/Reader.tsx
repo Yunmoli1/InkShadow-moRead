@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { FixedSizeList } from 'react-window'
 import {
   AlignLeft, ArrowLeft, BookOpen, ChevronLeft, ChevronRight, Eraser, List,
-  Minus, Moon, NotebookPen, Plus, RotateCcw, Save, Search, Sparkles, Sun, Type, Volume2, X,
+  Minus, Moon, NotebookPen, Plus, Repeat, RotateCcw, Save, Search, Sparkles, Sun, Type, Volume2, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/controls'
@@ -14,9 +14,10 @@ import { useToast } from '@/components/Toast'
 import { tts } from '@/lib/tts'
 import { cn, haptic } from '@/lib/utils'
 import { useReaderPrefs } from '@/stores/settings'
+import { SwitchSourceDialog } from '@/components/SwitchSourceDialog'
 import { useTheme } from '@/stores/theme'
 
-interface Novel { id: string; title: string; author: string; total_chapters: number; last_chapter_idx: number; last_scroll_pos: number }
+interface Novel { id: string; title: string; author: string; total_chapters: number; last_chapter_idx: number; last_scroll_pos: number; source_url?: string }
 interface ChapterItem { id: string; idx: number; title: string; word_count: number }
 interface ChapterContent extends ChapterItem { content: string; novel_id: string }
 interface Note { id: string; chapter_idx: number; chapter_title: string; excerpt: string; content: string; created_at?: string }
@@ -63,6 +64,7 @@ export default function Reader() {
   const [searching, setSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<SearchResultGroup[] | null>(null)
   const [highlightTerm, setHighlightTerm] = useState('')
+  const [switchOpen, setSwitchOpen] = useState(false)
 
   // 章节虚拟列表分页加载（1000+ 章节流畅滚动）
   const [allChapters, setAllChapters] = useState<ChapterItem[]>([])
@@ -463,6 +465,9 @@ export default function Reader() {
         <Button variant="ghost" size="iconSm" title="切换深浅主题" onClick={() => { haptic(); toggleTheme() }}>
           {theme === 'light' ? <Moon className="size-5" /> : <Sun className="size-5" />}
         </Button>
+        <Button variant="ghost" size="iconSm" title="换源" onClick={() => setSwitchOpen(true)}>
+          <Repeat className="size-5" />
+        </Button>
         <Button variant="ghost" size="iconSm" title="AI 摘要" onClick={askAi}>
           <Sparkles className={cn('size-5', panel === 'ai' && 'text-primary')} />
         </Button>
@@ -748,6 +753,19 @@ export default function Reader() {
           <NotebookPen className="mr-1 inline size-3.5" /> 添加笔记
         </button>
       )}
+
+      {/* 换源菜单 */}
+      <SwitchSourceDialog
+        novelId={novelId ?? ''}
+        novelTitle={novel?.title ?? ''}
+        currentUrl={novel?.source_url}
+        open={switchOpen}
+        onOpenChange={setSwitchOpen}
+        onSwitched={() => {
+          // 章节全部重建：整页刷新最可靠
+          window.location.reload()
+        }}
+      />
 
       {/* 底部进度条 */}
       <div className="fixed inset-x-0 bottom-0 z-40 h-1 bg-border/60">

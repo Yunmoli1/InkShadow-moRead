@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from sqlalchemy import delete, func, select
@@ -449,6 +449,34 @@ async def subscribe_novel(novel_id: str, body: SubscribeIn) -> dict:
         await db.commit()
     return {"id": novel_id, "subscribed": body.subscribed,
             "message": "已开启追更（每 6 小时自动检查）" if body.subscribed else "已关闭追更"}
+
+
+class SwitchSourceIn(BaseModel):
+    new_url: str = Field(min_length=8, max_length=2048)
+
+
+@router.post("/{novel_id}/switch-source")
+async def switch_source(novel_id: str, body: SwitchSourceIn) -> dict:
+    """一键换源：用新镜像 URL 重新增量抓取，完成后自动重建章节并更新来源。"""
+    from ..services import tool_registry
+    from ..services.task_manager import manager
+
+    async with SessionLocal() as db:
+        n = await db.get(Novel, novel_id)
+        if n is None:
+            raise HTTPException(404, "小说不存在")
+        if n.source_url and n.source_url.rstrip("/") == body.new_url.rstrip("/"):
+            raise HTTPException(400, "新来源与当前来源相同")
+        title = n.title
+    spec = tool_registry.get_spec("lncrawl")
+    if spec is None or not tool_registry.resolve_executable(spec):
+        raise HTTPException(400, "lncrawl 未安装，无法换源")
+    task = await manager.create_task(
+        tool="lncrawl", url=body.new_url, options={"format": "txt", "switch_novel_id": novel_id},
+        dest_type="novel", title=f"换源：{title}",
+    )
+    return {"task_id": task.id,
+            "message": "换源任务已创建（增量下载，完成后自动重建章节并更新来源）"}
 
 
 @router.post("/{novel_id}/check-update")
