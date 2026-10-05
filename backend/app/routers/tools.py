@@ -20,10 +20,16 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 
 @router.get("", response_model=list[ToolOut])
-async def list_tools() -> list[ToolOut]:
+async def list_tools(refresh: bool = False) -> list[ToolOut]:
+    import asyncio
+
+    specs = list(tool_registry.REGISTRY.values())
+    # 并发版本检测：13 个工具从串行 ~40s 降至并行 ~15s
+    versions = await asyncio.gather(
+        *(tool_registry.detect_version(spec, refresh=refresh) for spec in specs)
+    )
     out: list[ToolOut] = []
-    for spec in tool_registry.REGISTRY.values():
-        ver = await tool_registry.detect_version(spec)
+    for spec, ver in zip(specs, versions):
         out.append(ToolOut(
             name=spec.name,
             display=spec.display,

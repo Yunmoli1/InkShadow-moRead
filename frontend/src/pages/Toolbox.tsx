@@ -35,7 +35,7 @@ export default function Toolbox() {
     if (withRefresh) setRefreshing(true)
     setLoading(true)
     try {
-      const data = await api.get<ToolInfo[]>('/api/tools')
+      const data = await api.get<ToolInfo[]>('/api/tools', { refresh: withRefresh ? 1 : undefined })
       setTools(data)
       const n = data.filter((t) => t.installed).length
       toast('info', `检测完成：${n}/${data.length} 个工具可用`)

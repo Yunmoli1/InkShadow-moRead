@@ -185,17 +185,21 @@ def which_tool(exe: str) -> str | None:
     return shutil.which(exe, path=tool_search_path())
 
 
-_version_cache: dict[str, str | None] = {}
+_version_cache: dict[str, dict] = {}  # {name: {value, at}}
+_VERSION_TTL = 300.0  # 5 分钟，工具箱"重新检测"可强制刷新
 
 
-async def detect_version(spec: ToolSpec) -> str | None:
+async def detect_version(spec: ToolSpec, refresh: bool = False) -> str | None:
     """Return version string if the tool is installed & runnable, else None."""
+    import time
+
     if spec.name in ("builtin-web-saver", "web2novel", "item-fetch"):
         return "1.0.0"
     if not spec.executables:
         return None
-    if spec.name in _version_cache:
-        return _version_cache[spec.name]
+    cached = _version_cache.get(spec.name)
+    if cached and not refresh and time.monotonic() - cached["at"] < _VERSION_TTL:
+        return cached["value"]
     exe = which_tool(spec.executables[0])
     if not exe:
         for alt in spec.executables[1:]:
@@ -217,16 +221,16 @@ async def detect_version(spec: ToolSpec) -> str | None:
         except asyncio.TimeoutError:
             proc.kill()
             # 二进制存在但版本探测失败（如不支持 --version）→ 视为已安装、版本未知
-            _version_cache[spec.name] = "unknown"
+            _version_cache[spec.name] = {"value": "unknown", "at": time.monotonic()}
             return "unknown"
         text = out.decode("utf-8", errors="replace")
         m = re.search(spec.version_regex, text)
         ver = m.group(1) if m else "unknown"
-        _version_cache[spec.name] = ver
+        _version_cache[spec.name] = {"value": ver, "at": time.monotonic()}
         return ver
     except Exception:
         # 找得到可执行文件但无法运行 → 仍视为已安装（下载时会给出明确错误）
-        _version_cache[spec.name] = "unknown"
+        _version_cache[spec.name] = {"value": "unknown", "at": time.monotonic()}
         return "unknown"
 
 
