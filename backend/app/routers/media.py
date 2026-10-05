@@ -31,6 +31,7 @@ def _media_out(m: MediaItem) -> MediaOut:
         file_size=m.file_size, duration=m.duration,
         preview_url=f"/api/media/{m.id}/file",
         thumbnail_url=f"/api/media/{m.id}/thumb" if m.thumbnail_path else "",
+        tags=m.tags or [],
         extra=m.extra or {},
         created_at=m.created_at,
     )
@@ -99,8 +100,31 @@ async def batch_import(files: list[UploadFile] = File(...)) -> dict:
                 extra={"imported": True},
             ))
             imported.append(name)
+            # 后台 AI 自动标签（失败静默），等提交后按文件路径定位 id
+            import asyncio as _aio
+
+            _aio.get_running_loop().create_task(_tag_after_commit(dest))
         await db.commit()
     return {"imported": imported, "skipped": skipped, "count": len(imported)}
+
+
+async def _tag_after_commit(dest) -> None:
+    """等提交完成后按文件路径找到 media id 再打标（后台任务）。"""
+    import asyncio
+
+    from ..services.tagger import tag_media
+
+    rel = dest.relative_to(config.DATA_DIR).as_posix()
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        async with SessionLocal() as db:
+            m = await db.scalar(select(MediaItem).where(MediaItem.file_path == rel))
+        if m is not None:
+            try:
+                await tag_media(m.id)
+            except Exception:
+                pass
+            return
 
 
 @router.get("/{media_id}", response_model=MediaOut)
@@ -144,6 +168,24 @@ async def media_progress(media_id: str, body: dict) -> dict:
         m.extra = extra
         await db.commit()
     return {"id": media_id, "progress": extra["progress"], "message": "播放进度已保存"}
+
+
+@router.post("/auto-tag")
+async def media_auto_tag() -> dict:
+    """为还没有标签的媒体生成 AI 标签。"""
+    import asyncio
+
+    from ..services.tagger import tag_media
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(MediaItem))).scalars().all()
+        targets = [m.id for m in rows if not (m.extra or {}).get("tags")]
+    done = 0
+    for mid in targets[:100]:
+        tags = await tag_media(mid)
+        if tags:
+            done += 1
+    return {"tagged": done, "message": f"已为 {done} 个资源生成标签"}
 
 
 @router.post("/backfill-assets")

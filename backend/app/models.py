@@ -34,6 +34,7 @@ class Novel(Base):
     last_chapter_idx: Mapped[int] = mapped_column(Integer, default=0)
     last_scroll_pos: Mapped[float] = mapped_column(Float, default=0.0)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
+    tags: Mapped[list] = mapped_column(JSON, default=list)  # AI 自动标签
     # 追更订阅
     subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
     new_chapters: Mapped[int] = mapped_column(Integer, default=0)  # 待读新章数
@@ -94,6 +95,7 @@ class MediaItem(Base):
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     duration: Mapped[float] = mapped_column(Float, default=0.0)      # seconds, av only
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
+    tags: Mapped[list] = mapped_column(JSON, default=list)  # AI 自动标签
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -29,6 +29,7 @@ def _novel_out(n: Novel) -> NovelOut:
         category=n.category, total_chapters=n.total_chapters, read_chapters=n.read_chapters,
         last_chapter_idx=n.last_chapter_idx, last_scroll_pos=n.last_scroll_pos,
         file_size=n.file_size, subscribed=bool(n.subscribed), new_chapters=n.new_chapters or 0,
+        tags=n.tags or [],
         created_at=n.created_at, updated_at=n.updated_at,
     )
 
@@ -125,6 +126,12 @@ async def import_novels(files: list[UploadFile] = File(...)) -> ImportResult:
             original_stem = f.filename.rsplit(".", 1)[0] if f.filename else None
             novel = await import_novel_file(tmp, fallback_title=original_stem)
             result.imported.append(novel.title)
+            # 后台 AI 自动标签（失败静默）
+            import asyncio as _aio
+
+            from ..services.tagger import tag_novel
+
+            _aio.get_running_loop().create_task(_safe_tag(novel.id, tag_novel))
         except Exception as exc:
             result.errors.append(f"{f.filename}: {exc}")
         finally:
@@ -477,6 +484,36 @@ async def switch_source(novel_id: str, body: SwitchSourceIn) -> dict:
     )
     return {"task_id": task.id,
             "message": "换源任务已创建（增量下载，完成后自动重建章节并更新来源）"}
+
+
+async def _safe_tag(novel_id: str, fn) -> None:
+    try:
+        await fn(novel_id)
+    except Exception:
+        pass
+
+
+@router.post("/auto-tag")
+async def novels_auto_tag() -> dict:
+    """为还没有标签的书生成 AI 标签（需本地 Ollama / 外部 AI 可用）。"""
+    import asyncio
+
+    from ..models import Novel
+    from ..services.tagger import tag_novel
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(Novel.id).where(Novel.category != "文章"))).scalars().all()
+        targets = [r for r in rows if r]
+    # 取全部书再过滤无标签的
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(Novel))).scalars().all()
+        targets = [n.id for n in rows if not n.tags]
+    done = 0
+    for nid in targets[:50]:
+        tags = await tag_novel(nid)
+        if tags:
+            done += 1
+    return {"tagged": done, "message": f"已为 {done} 本书生成标签"}
 
 
 @router.post("/{novel_id}/check-update")

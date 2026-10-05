@@ -158,9 +158,15 @@ export default function SettingsPage() {
             </Button>
           </div>
           {tokenDraft.trim() && (
-            <p className="break-all rounded-lg bg-muted p-2 font-mono text-[11px] text-muted-foreground">
-              移动端地址：http://&lt;本机IP&gt;:8686/?token={tokenDraft.trim()}
-            </p>
+            <>
+              <p className="break-all rounded-lg bg-muted p-2 font-mono text-[11px] text-muted-foreground">
+                移动端地址：http://&lt;本机IP&gt;:8686/?token={tokenDraft.trim()}
+              </p>
+              <p className="break-all rounded-lg bg-muted p-2 font-mono text-[11px] text-muted-foreground">
+                OPDS 书库（KOReader 等阅读 App 订阅，用户名任意、密码=令牌）：
+                http://&lt;本机IP&gt;:8686/opds
+              </p>
+            </>
           )}
         </CardContent>
       </Card>

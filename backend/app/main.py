@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .database import init_db
-from .routers import media, novels, settings, tasks, tools
+from .routers import media, novels, opds, settings, tasks, tools
 
 
 @asynccontextmanager
@@ -55,6 +55,7 @@ app.include_router(tasks.router)
 app.include_router(novels.router)
 app.include_router(media.router)
 app.include_router(settings.router)
+app.include_router(opds.router)
 
 
 # --- 可选访问令牌（局域网访问保护） ----------------------------------------
@@ -74,6 +75,17 @@ async def access_token_guard(request: Request, call_next):
                 or request.query_params.get("token")
                 or ""
             )
+            if not provided:
+                # OPDS 客户端普遍使用 HTTP Basic（用户名任意，密码=令牌）
+                auth = request.headers.get("authorization", "")
+                if auth.lower().startswith("basic "):
+                    import base64
+
+                    try:
+                        decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="replace")
+                        provided = decoded.split(":", 1)[1]
+                    except Exception:
+                        provided = ""
             if not hmac.compare_digest(provided, token):
                 return JSONResponse({"detail": "需要访问令牌"}, status_code=401)
     return await call_next(request)

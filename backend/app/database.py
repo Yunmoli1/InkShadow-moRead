@@ -42,6 +42,8 @@ async def init_db() -> None:
             "ALTER TABLE novels ADD COLUMN new_chapters INTEGER",
             "ALTER TABLE novels ADD COLUMN last_check_chapters INTEGER",
             "ALTER TABLE novels ADD COLUMN last_check_at DATETIME",
+            "ALTER TABLE novels ADD COLUMN tags JSON",
+            "ALTER TABLE media ADD COLUMN tags JSON",
             "CREATE INDEX IF NOT EXISTS ix_media_title ON media (title)",
             "CREATE INDEX IF NOT EXISTS ix_media_source ON media (source_url)",
             "CREATE INDEX IF NOT EXISTS ix_notes_novel_chapter ON notes (novel_id, chapter_idx)",

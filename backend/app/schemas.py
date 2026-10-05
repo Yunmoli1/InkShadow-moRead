@@ -92,6 +92,7 @@ class NovelOut(BaseModel):
     file_size: int
     subscribed: bool = False
     new_chapters: int = 0
+    tags: list = []
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -150,6 +151,7 @@ class MediaOut(BaseModel):
     duration: float
     preview_url: str = ""
     thumbnail_url: str = ""
+    tags: list = []
     extra: dict = {}
     created_at: datetime | None = None
 
