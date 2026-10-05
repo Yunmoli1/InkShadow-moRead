@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckCircle2, CircleX, Loader2, Pause, Play, RotateCcw, Trash2, Timer } from 'lucide-react'
+import { CheckCircle2, CircleX, FileText, Loader2, Pause, Play, RotateCcw, Trash2, Timer, Wrench } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge, Skeleton } from '@/components/ui/misc'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api, subscribeTask, type TaskSseEvent } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn, notify } from '@/lib/utils'
@@ -19,7 +20,15 @@ interface Task {
   message: string
   error_code?: string
   retry_count?: number
+  fallback_chain?: string[]
+  options?: Record<string, unknown>
   created_at?: string
+}
+
+interface ToolInfo {
+  name: string
+  display: string
+  installed: boolean
 }
 
 // A2 错误分类码：与 backend/app/services/error_codes.py 保持一致
@@ -129,10 +138,11 @@ export default function Tasks() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.filter((t) => t.status === 'running' || t.status === 'queued').map((t) => t.id).join(',')])
 
-  const act = async (id: string, action: 'pause' | 'resume' | 'delete' | 'retry') => {
-    if (action === 'retry') {
+  const act = async (id: string, action: 'pause' | 'resume' | 'delete' | 'retry' | 'retry-same') => {
+    if (action === 'retry' || action === 'retry-same') {
       try {
-        const res = await api.post<{ message: string }>(`/api/tasks/${id}/retry`)
+        const res = await api.post<{ message: string }>(
+          `/api/tasks/${id}/retry${action === 'retry-same' ? '?same_tool=true' : ''}`)
         toast('success', res.message)
         load()
       } catch (err) {
@@ -153,6 +163,8 @@ export default function Tasks() {
       toast('error', err instanceof Error ? err.message : '操作失败')
     }
   }
+
+  const [detailId, setDetailId] = useState<string | null>(null)
 
   return (
     <div className="space-y-6">
@@ -235,6 +247,9 @@ export default function Tasks() {
                       <RotateCcw className="size-4 text-primary" />
                     </Button>
                   )}
+                  <Button variant="ghost" size="iconSm" title="详情与完整日志" onClick={() => setDetailId(t.id)}>
+                    <FileText className="size-4" />
+                  </Button>
                   <Button variant="ghost" size="iconSm" title="取消并删除" onClick={() => act(t.id, 'delete')}>
                     <Trash2 className="size-4 text-destructive" />
                   </Button>
@@ -266,6 +281,13 @@ export default function Tasks() {
           )}
         </div>
       )}
+
+      <TaskDetailDialog
+        taskId={detailId}
+        tasks={tasks}
+        onClose={() => setDetailId(null)}
+        onRetrySame={(id) => act(id, 'retry-same')}
+      />
     </div>
   )
 }
@@ -276,4 +298,94 @@ function StatusIcon({ status }: { status: string }) {
   if (status === 'running') return <Loader2 className="size-5 animate-spin text-primary" />
   if (status === 'paused') return <Pause className="size-5 text-warning" />
   return <Timer className="size-5 text-muted-foreground" />
+}
+
+/** B3 任务详情：完整日志 + 回退链展示 + 复制错误 + 相同工具重试 */
+function TaskDetailDialog({ taskId, tasks, onClose, onRetrySame }: {
+  taskId: string | null
+  tasks: Task[]
+  onClose: () => void
+  onRetrySame: (id: string) => void
+}) {
+  const [logLines, setLogLines] = useState<string[]>([])
+  const [tools, setTools] = useState<ToolInfo[]>([])
+  const [loading, setLoading] = useState(false)
+  const { toast } = useToast()
+  const task = tasks.find((t) => t.id === taskId)
+
+  useEffect(() => {
+    if (!taskId) return
+    setLoading(true)
+    api.get<{ lines: string[] }>(`/api/tasks/${taskId}/log`)
+      .then((r) => setLogLines(r.lines || []))
+      .catch(() => setLogLines([]))
+      .finally(() => setLoading(false))
+    api.get<ToolInfo[]>('/api/tools').then(setTools).catch(() => {})
+  }, [taskId])
+
+  const installedSet = new Map(tools.map((t) => [t.name, t.installed]))
+  const chain = task?.fallback_chain ?? []
+  const otherTool = (task?.options as { original_tool?: string } | undefined)?.original_tool
+
+  const copyError = async () => {
+    if (!task) return
+    try {
+      await navigator.clipboard.writeText(`[${task.error_code}] ${task.message}`)
+      toast('success', '错误详情已复制')
+    } catch {
+      toast('error', '复制失败（浏览器限制）')
+    }
+  }
+
+  return (
+    <Dialog open={taskId !== null} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="text-base">任务详情：{task?.title || ''}</DialogTitle>
+        </DialogHeader>
+        {task && (
+          <div className="space-y-3">
+            {task.status === 'failed' && (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+                <span className="font-medium text-destructive">{ERROR_LABELS[task.error_code ?? ''] ?? task.error_code}</span>
+                <span className="mx-1.5 text-muted-foreground/50">·</span>
+                <span className="text-muted-foreground">{ERROR_SUGGESTIONS[task.error_code ?? ''] ?? task.message}</span>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={copyError}>
+                复制错误详情
+              </Button>
+              {task.status === 'failed' && (
+                <Button variant="outline" size="sm" title={otherTool && otherTool !== task.tool ? `用最初指定的工具 ${otherTool} 重试` : ''} onClick={() => onRetrySame(task.id)}>
+                  <Wrench className="size-4" /> 重试（相同工具{otherTool && otherTool !== task.tool ? ` ${otherTool}` : ''}）
+                </Button>
+              )}
+              <Badge tone="outline">重试次数 {task.retry_count ?? 0}</Badge>
+            </div>
+            {chain.length > 0 && (
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">回退链：</span>
+                {task.tool}
+                {chain.map((name) => (
+                  <span key={name}>
+                    {' → '}
+                    <span className={cn(installedSet.get(name) === false && 'opacity-50')}>
+                      {name}{installedSet.get(name) === false ? '（未安装）' : ''}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div>
+              <p className="mb-1 text-xs font-medium text-muted-foreground">完整日志（{logLines.length} 行）</p>
+              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/60 p-3 text-[11px] leading-relaxed">
+                {loading ? '加载中…' : logLines.length ? logLines.join('\n') : '暂无日志'}
+              </pre>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
 }

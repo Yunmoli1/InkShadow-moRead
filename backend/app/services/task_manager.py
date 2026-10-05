@@ -23,7 +23,7 @@ from ..database import SessionLocal
 from ..models import DownloadTask, MediaItem, Novel
 from . import tool_registry
 from . import netenv
-from .applog import get_logger, redact as _redact
+from .applog import get_logger, redact as _redact, LOG_DIR
 from .error_codes import classify_failure, classify_text
 from .novel_parser import import_novel_file
 from .web_saver import save_single_page
@@ -31,11 +31,47 @@ from .web_saver import save_single_page
 MAX_LOG_LINES = 200
 MAX_CONCURRENT_TASKS = 2
 TERMINAL_STATES = {"completed", "failed", "canceled"}
+TASK_LOGS_DIR = LOG_DIR / "tasks"
 
 # 总超时：挂死的工具进程不能永远占用并发槽（可用环境变量调整）
 TASK_TIMEOUT_SEC = float(os.environ.get("MOREAD_TASK_TIMEOUT_HOURS", "2")) * 3600
 
 log = get_logger("tasks")
+
+
+class MirroredLog(deque):
+    """log_tail 双写：内存尾部（进 DB/SSE）+ 全量文本（data/logs/tasks/<id>.log）。
+
+    B3 完整日志查看的数据源；文件写入失败静默降级为仅内存。
+    """
+
+    def __init__(self, task_id: str, maxlen: int):
+        super().__init__(maxlen=maxlen)
+        self.task_id = task_id
+        self._fh = None
+        try:
+            TASK_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            self._fh = open(TASK_LOGS_DIR / f"{task_id}.log", "a", encoding="utf-8",
+                            errors="replace")
+        except OSError:
+            self._fh = None
+
+    def append(self, line: str) -> None:
+        super().append(line)
+        if self._fh:
+            try:
+                self._fh.write(_redact(line.rstrip("\n")) + "\n")
+                self._fh.flush()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        if self._fh:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
 
 
 class NoContentError(Exception):
@@ -136,6 +172,7 @@ class TaskManager:
         if spec is None:
             raise KeyError(f"未知工具: {tool}")
         options = options or {}
+        options.setdefault("original_tool", tool)  # B3：「重试使用相同工具」数据源
         out_dir = (
             config.DOWNLOADS_DIR / f"{uuid.uuid4().hex[:12]}"
         ).as_posix()
@@ -212,16 +249,22 @@ class TaskManager:
             self._worker_tasks[task_id] = worker
         return requeued
 
-    async def retry(self, task_id: str) -> DownloadTask | None:
-        """重试失败/取消的任务：复制原任务参数创建新任务（支持断点续传）。"""
+    async def retry(self, task_id: str, same_tool: bool = False) -> DownloadTask | None:
+        """重试失败/取消的任务：复制原任务参数创建新任务（支持断点续传）。
+
+        same_tool=True 时忽略回退链的自动切换结果，用最初指定的工具重试。
+        """
         async with SessionLocal() as db:
             task = await db.get(DownloadTask, task_id)
             if task is None or task.status not in ("failed", "canceled"):
                 return None
-            spec = tool_registry.get_spec(task.tool)
+            tool = task.tool
+            if same_tool:
+                tool = str((task.options or {}).get("original_tool") or tool)
+            spec = tool_registry.get_spec(tool)
             if spec is None:
                 return None
-            tool, url = task.tool, task.url
+            url = task.url
             options = dict(task.options or {})
             dest_type = task.dest_type
             title = task.title
@@ -297,6 +340,8 @@ class TaskManager:
             task = await db.get(DownloadTask, task_id)
             task.tool = nxt.name
             await db.commit()
+        if isinstance(log_tail, MirroredLog):
+            log_tail.close()  # 递归的 _execute 会为新工具创建新的镜像日志
         await self._execute(task_id, nxt, url, options, _fallback=remaining)
         return True
 
@@ -306,7 +351,7 @@ class TaskManager:
     ) -> None:
         if _fallback is None:
             _fallback = tool_registry.fallback_chain(spec)
-        log_tail: deque[str] = deque(maxlen=MAX_LOG_LINES)
+        log_tail = MirroredLog(task_id, maxlen=MAX_LOG_LINES)
 
         async with SessionLocal() as db:
             task = await db.get(DownloadTask, task_id)
@@ -581,6 +626,8 @@ class TaskManager:
         self.cancel_flags.pop(task_id, None)
         self.pause_flags.pop(task_id, None)
         self._worker_tasks.pop(task_id, None)
+        if isinstance(log_tail, MirroredLog):
+            log_tail.close()
 
     # -- builtin direct-file fetcher (selective / archive downloads) ----------
 
@@ -658,6 +705,8 @@ class TaskManager:
         finally:
             self.cancel_flags.pop(task_id, None)
             self._worker_tasks.pop(task_id, None)
+            if isinstance(log_tail, MirroredLog):
+                log_tail.close()
 
     # -- builtin webpage→novel converter --------------------------------------
 
@@ -697,6 +746,8 @@ class TaskManager:
         finally:
             self.cancel_flags.pop(task_id, None)
             self._worker_tasks.pop(task_id, None)
+            if isinstance(log_tail, MirroredLog):
+                log_tail.close()
 
     # -- builtin single page saver -------------------------------------------
 
@@ -729,6 +780,8 @@ class TaskManager:
         finally:
             self.cancel_flags.pop(task_id, None)
             self._worker_tasks.pop(task_id, None)
+            if isinstance(log_tail, MirroredLog):
+                log_tail.close()
 
     # -- post download import -------------------------------------------------
 

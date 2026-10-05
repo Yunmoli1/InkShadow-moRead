@@ -10,19 +10,23 @@ from sqlalchemy import func, select
 from ..database import SessionLocal
 from ..models import DownloadTask
 from ..schemas import TaskOut, TaskPage
+from ..services import tool_registry
 from ..services.task_manager import TERMINAL_STATES, bus, manager
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
 def _task_out(t: DownloadTask) -> TaskOut:
+    # B3：当前工具的回退链（按优先顺序的候选工具名）
+    spec = tool_registry.get_spec(t.tool)
+    chain = [s.name for s in tool_registry.fallback_chain(spec)] if spec else []
     return TaskOut(
         id=t.id, tool=t.tool, task_type=t.task_type, url=t.url, title=t.title,
         status=t.status, progress=t.progress, speed=t.speed, eta=t.eta,
         message=t.message, dest_type=t.dest_type, output_dir=t.output_dir,
         options=t.options or {},
         log_tail=t.log_tail or [], error_code=t.error_code or "",
-        retry_count=t.retry_count or 0,
+        retry_count=t.retry_count or 0, fallback_chain=chain,
         created_at=t.created_at, started_at=t.started_at, finished_at=t.finished_at,
     )
 
@@ -128,13 +132,37 @@ async def resume_task(task_id: str) -> dict:
 
 
 @router.post("/{task_id}/retry")
-async def retry_task(task_id: str) -> dict:
-    """重试失败/已取消的任务：复制原参数创建新任务（断点续传）。"""
-    new_task = await manager.retry(task_id)
+async def retry_task(task_id: str, same_tool: bool = False) -> dict:
+    """重试失败/已取消的任务：复制原参数创建新任务（断点续传）。
+
+    same_tool=true 忽略回退链切换结果，用最初指定的工具重试（B3）。
+    """
+    new_task = await manager.retry(task_id, same_tool=same_tool)
     if new_task is None:
         raise HTTPException(400, "任务不存在或状态不可重试（仅失败/已取消可重试）")
     return {"task_id": new_task.id, "status": new_task.status,
             "message": "已创建重试任务（原进度可续传）"}
+
+
+@router.get("/{task_id}/log")
+async def task_full_log(task_id: str) -> dict:
+    """完整任务日志（B3）：镜像文件全量内容，缺失时退回 DB 中的尾部日志。"""
+    from .. import config
+
+    async with SessionLocal() as db:
+        task = await db.get(DownloadTask, task_id)
+        if task is None:
+            raise HTTPException(404, "任务不存在")
+        tail = list(task.log_tail or [])
+    log_path = config.DATA_DIR / "logs" / "tasks" / f"{task_id}.log"
+    lines: list[str] = tail
+    if log_path.exists():
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines() or tail
+        except OSError:
+            pass
+    return {"task_id": task_id, "lines": lines}
 
 
 @router.delete("/{task_id}")

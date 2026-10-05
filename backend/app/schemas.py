@@ -60,6 +60,7 @@ class TaskOut(BaseModel):
     log_tail: list[str] = []
     error_code: str = ""
     retry_count: int = 0
+    fallback_chain: list[str] = []
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
