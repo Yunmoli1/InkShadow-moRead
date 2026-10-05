@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/controls'
 import { Badge } from '@/components/ui/misc'
 import { api } from '@/lib/api'
+import type { Chapter as ChapterItem, ChapterContent, Note, Novel } from '@/lib/domain'
 import { useToast } from '@/components/Toast'
 import { tts } from '@/lib/tts'
 import { cn, haptic } from '@/lib/utils'
@@ -17,10 +18,6 @@ import { useReaderPrefs } from '@/stores/settings'
 import { SwitchSourceDialog } from '@/components/SwitchSourceDialog'
 import { useTheme } from '@/stores/theme'
 
-interface Novel { id: string; title: string; author: string; total_chapters: number; last_chapter_idx: number; last_scroll_pos: number; source_url?: string }
-interface ChapterItem { id: string; idx: number; title: string; word_count: number }
-interface ChapterContent extends ChapterItem { content: string; novel_id: string }
-interface Note { id: string; chapter_idx: number; chapter_title: string; excerpt: string; content: string; created_at?: string }
 interface AiSum { summary: string; model: string; cached: boolean }
 interface SearchResultGroup { chapter_id: string; chapter_idx: number; title: string; hits: { where: string; snippet: string }[] }
 

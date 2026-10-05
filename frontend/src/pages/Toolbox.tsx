@@ -6,19 +6,8 @@ import { Badge, Skeleton } from '@/components/ui/misc'
 import { api } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn } from '@/lib/utils'
+import type { ToolInfo } from '@/lib/domain'
 
-interface ToolInfo {
-  name: string
-  display: string
-  category: string
-  installed: boolean
-  version: string | null
-  install_hint: string
-  supports_search: boolean
-  content_types: string[]
-  docs_url: string
-  remark: string
-}
 
 const CATEGORY_LABEL: Record<string, string> = {
   universal: '全能下载', video: '视频/音频', image: '图片专项',

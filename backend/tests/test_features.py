@@ -142,7 +142,8 @@ def test_task_options_persist_and_retry(client):
     assert r.status_code == 201
     tid = r.json()["task_id"]
     task = client.get(f"/api/tasks/{tid}").json()
-    assert task["options"] == {"marker": "keep-me"}, task.get("options")
+    # B3 起系统会注入 original_tool；断言自定义 options 被完整保留即可
+    assert task["options"].get("marker") == "keep-me", task.get("options")
 
     # 失败/完成的任务可重试 → 新任务保留 url/options
     deadline = __import__("time").time() + 30
@@ -168,7 +169,7 @@ def test_task_options_persist_and_retry(client):
     new_id = retry.json()["task_id"]
     assert new_id != tid2
     new_task = client.get(f"/api/tasks/{new_id}").json()
-    assert new_task["options"] == {"marker": "retry-me"}
+    assert new_task["options"].get("marker") == "retry-me"
     assert new_task["url"] == "https://example.com/options-test-2"
     # 不可重试：running/queued/completed 状态
     assert client.post(f"/api/tasks/{new_id}/retry").status_code in (400,)

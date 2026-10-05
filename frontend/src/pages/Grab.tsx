@@ -9,16 +9,8 @@ import { Badge } from '@/components/ui/misc'
 import { api, subscribeTask, type TaskSseEvent } from '@/lib/api'
 import { useToast } from '@/components/Toast'
 import { cn, notify, requestNotifyPermission } from '@/lib/utils'
+import type { ToolInfo } from '@/lib/domain'
 
-interface ToolInfo {
-  name: string
-  display: string
-  category: string
-  installed: boolean
-  version: string | null
-  install_hint: string
-  content_types: string[]
-}
 
 const TYPES = [
   { value: 'auto', label: '自动识别' },

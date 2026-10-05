@@ -108,6 +108,13 @@ class ChapterOut(BaseModel):
     word_count: int
 
 
+class ChapterPage(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    items: list[ChapterOut]
+
+
 class ChapterContentOut(BaseModel):
     id: str
     idx: int

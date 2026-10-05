@@ -6,22 +6,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge, Progress, Skeleton } from '@/components/ui/misc'
 import { api } from '@/lib/api'
+import type { Novel } from '@/lib/domain'
 import { useToast } from '@/components/Toast'
 import { Bell, BellOff, RefreshCw } from 'lucide-react'
 import { cn, formatBytes, haptic } from '@/lib/utils'
-
-interface Novel {
-  id: string
-  title: string
-  author: string
-  total_chapters: number
-  read_chapters: number
-  last_chapter_idx: number
-  file_size: number
-  file_type: string
-  subscribed: boolean
-  new_chapters: number
-}
 
 /** Web Worker 解析预览结果（大文件不阻塞 UI） */
 interface WorkerPreview {

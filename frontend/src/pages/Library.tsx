@@ -6,20 +6,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge, Skeleton } from '@/components/ui/misc'
 import { api } from '@/lib/api'
+import type { Media } from '@/lib/domain'
 import { useToast } from '@/components/Toast'
 import { cn, formatBytes, haptic, MEDIA_TYPE_LABEL } from '@/lib/utils'
 import { RefreshCw } from 'lucide-react'
-
-interface Media {
-  id: string
-  media_type: string
-  title: string
-  source_url: string
-  file_size: number
-  preview_url: string
-  thumbnail_url: string
-  created_at?: string
-}
 
 const FILTERS = ['全部', 'image', 'video', 'audio', 'page', 'doc', 'file']
 

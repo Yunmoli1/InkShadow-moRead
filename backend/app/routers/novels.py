@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select
 from ..database import SessionLocal
 from ..models import AiSummary, Chapter, Note, Novel, ReadingSession, Setting
 from ..schemas import (
-    AiSummaryIn, AiSummaryOut, ChapterContentOut, ChapterOut, ImportResult,
+    AiSummaryIn, AiSummaryOut, ChapterContentOut, ChapterOut, ChapterPage, ImportResult,
     NoteIn, NoteOut, NovelOut, ProgressIn, ReadingSessionIn,
 )
 from ..services.ai_service import AiError, stream_summarize, summarize
@@ -194,7 +194,7 @@ async def get_novel(novel_id: str) -> NovelOut:
         return _novel_out(n)
 
 
-@router.get("/{novel_id}/chapters")
+@router.get("/{novel_id}/chapters", response_model=ChapterPage)
 async def list_chapters(
     novel_id: str, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
 ) -> dict:

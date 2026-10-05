@@ -5,31 +5,9 @@ import { Button } from '@/components/ui/button'
 import { Badge, Skeleton } from '@/components/ui/misc'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api, subscribeTask, type TaskSseEvent } from '@/lib/api'
+import type { Task, ToolInfo } from '@/lib/domain'
 import { useToast } from '@/components/Toast'
 import { cn, notify } from '@/lib/utils'
-
-interface Task {
-  id: string
-  tool: string
-  url: string
-  title: string
-  status: string
-  progress: number
-  speed: string
-  eta: string
-  message: string
-  error_code?: string
-  retry_count?: number
-  fallback_chain?: string[]
-  options?: Record<string, unknown>
-  created_at?: string
-}
-
-interface ToolInfo {
-  name: string
-  display: string
-  installed: boolean
-}
 
 // A2 错误分类码：与 backend/app/services/error_codes.py 保持一致
 const ERROR_LABELS: Record<string, string> = {
