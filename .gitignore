@@ -42,3 +42,8 @@ releases/
 .vscode/
 .idea/
 .DS_Store
+
+# B6 e2e
+backend/.e2e-data/
+frontend/test-results/
+frontend/playwright-report/
