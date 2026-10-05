@@ -19,6 +19,21 @@ engine = create_async_engine(
     connect_args={"timeout": 30},
 )
 
+
+from sqlalchemy import event
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _sqlite_pragmas(dbapi_conn, _record):
+    """长运行服务稳定性（arr 系最佳实践）：WAL 减少读写互斥、
+    NORMAL 同步级别兼顾性能与安全、外键约束、忙等待 5 秒。"""
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA foreign_keys=ON")
+    cur.execute("PRAGMA busy_timeout=5000")
+    cur.close()
+
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

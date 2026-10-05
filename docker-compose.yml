@@ -10,6 +10,13 @@ services:
     environment:
       - MOREAD_DATA_DIR=/app/backend/data
       - MOREAD_QUOTA_GB=20
+    # 内置看门狗：应用级健康检查（而非仅进程存活），连续失败触发重建
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8686/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   # 可选：网页完整归档（ArchiveBox）。安装后在工具箱中会显示为可用。
