@@ -113,6 +113,9 @@ async def opds_books(request: Request):
             "links": [
                 {"rel": "http://opds-spec.org/acquisition", "type": "text/plain",
                  "href": f"/api/novels/{n.id}/download.txt{suffix}"},
+                # B2：EPUB 按需生成（首次访问时由后端动态打包并缓存）
+                {"rel": "http://opds-spec.org/acquisition", "type": "application/epub+zip",
+                 "href": f"/api/novels/{n.id}/download.epub{suffix}"},
             ],
         })
     xml = _feed("moread-books", "全部书籍", "/opds/books", entries)

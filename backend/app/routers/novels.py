@@ -121,6 +121,29 @@ async def novel_tag_list() -> list[dict]:
             sorted(counter.items(), key=lambda kv: -kv[1])[:50]]
 
 
+@router.get("/{novel_id}/download.epub")
+async def download_epub(novel_id: str):
+    """按需生成并下载整本书 EPUB（B2，OPDS acquisition 目标）。
+
+    带缓存的同步生成在后台线程执行；无章节返回 404。
+    """
+    from fastapi.responses import FileResponse
+
+    from ..services.epub_export import build_epub
+
+    try:
+        path = await build_epub(novel_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "小说不存在")
+    except ValueError as exc:
+        raise HTTPException(404, str(exc) or "无章节内容")
+
+    async with SessionLocal() as db:
+        n = await db.get(Novel, novel_id)
+    title = (n.title if n else "book") or "book"
+    return FileResponse(path, media_type="application/epub+zip", filename=f"{title}.epub")
+
+
 @router.post("/import", response_model=ImportResult)
 async def import_novels(files: list[UploadFile] = File(...)) -> ImportResult:
     """批量导入本地小说文件（TXT/EPUB）。"""
