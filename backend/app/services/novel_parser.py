@@ -142,7 +142,9 @@ def _extract_epub_images(zf: zipfile.ZipFile, chapter_path: str, html: str, imag
             base = posixpath.basename(target)
             stem, ext = posixpath.splitext(base)
             ext = ext.lower() or ".img"
-            name = f"img{len(images) + 1:03d}_{re.sub(r'[\\/:*?\"<>| ]', '_', stem)[:40]}{ext}"
+            # 注意：正则不能内联进 f-string 表达式——Python 3.11 禁止表达式含反斜杠
+            bad_chars = re.sub(r'[\\/:*?"<>| ]', "_", stem)
+            name = f"img{len(images) + 1:03d}_{bad_chars[:40]}{ext}"
             images[name] = zf.read(target)
         except KeyError:
             name = None
