@@ -48,5 +48,6 @@
       "esbuild",
       "sharp"
     ]
-  }
+  },
+  "packageManager": "pnpm@11.9.0"
 }

@@ -16,7 +16,7 @@ jobs:
       - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: Run pytest
         working-directory: backend
         run: python -m pytest -q
@@ -27,9 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # pnpm 版本由 frontend/package.json 的 packageManager 字段决定（pnpm 11）：
+      # pnpm-workspace.yaml 是 pnpm 11 的 settings 格式（allowBuilds），pnpm 9 无法读取
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          package_json_file: frontend/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -52,7 +54,7 @@ jobs:
           python-version: '3.11'
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          package_json_file: frontend/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -61,7 +63,7 @@ jobs:
       - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: Install frontend deps
         working-directory: frontend
         run: pnpm install --frozen-lockfile

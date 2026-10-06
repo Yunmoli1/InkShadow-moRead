@@ -1,0 +1,2 @@
+# 测试/开发依赖（CI 与本地跑 pytest 用；运行时依赖见 requirements.txt）
+pytest>=8.0
