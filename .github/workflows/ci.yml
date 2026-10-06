@@ -19,7 +19,14 @@ jobs:
           pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: Run pytest
         working-directory: backend
-        run: python -m pytest -q
+        run: |
+          set -o pipefail
+          python -m pytest -q --tb=line 2>&1 | tee /tmp/pytest-output.log
+      - name: Surface pytest failures as annotations
+        if: failure()
+        run: |
+          grep -E "^(FAILED|ERROR)" /tmp/pytest-output.log | head -30 | sed 's/^/::error::/' || true
+          tail -5 /tmp/pytest-output.log | sed 's/^/::error::/' || true
         env:
           MOREAD_DATA_DIR: /tmp/moread-ci-data
 
