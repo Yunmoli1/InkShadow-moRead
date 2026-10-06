@@ -97,7 +97,7 @@
 
 | # | 事项 | 方案 | 验收标准 |
 | --- | --- | --- | --- |
-| N1 | CI 首跑盯绿 | `.github/workflows/ci.yml` 首次触发尚未验证；关注三点：pnpm 9 与 lockfileVersion 9.0 兼容、requirements 在 Linux 可装、e2e 依赖外网（example.com，GH Runner 默认可达） | CI 三段流水线全绿 |
+| N1 | CI 首跑盯绿 | ✅ 2026-10-06 达成。过程中修复四处：① pnpm9 无法读取 pnpm11 格式 pnpm-workspace.yaml → 经 packageManager 钉死 pnpm11；② requirements 缺 pytest → 新增 requirements-dev.txt；③ f-string 表达式含反斜杠是 py3.11 语法错误（本地 3.14 未暴露）→ 正则外提 + AST 扫描脚本；④ switch-source 测试未打桩工具门禁 → monkeypatch resolve_executable | CI 三段流水线全绿（run #6，e2e 首跑通过） |
 | N2 | 依赖锁定 | `pip freeze` 导出 `backend/requirements.lock`，CI/构建走 lock，`requirements.txt` 保留宽松范围供开发 | CI 与本地依赖一致，可复现 |
 | N3 | schema 版本表 | 建轻量 `schema_version` 表（单机个人应用，Alembic 偏重）；现有迁移清单按版本编号，启动时只执行未应用的迁移并写入版本 | 重复启动不重复执行迁移；降级启动给出明确报错 |
 | N4 | 真机/发布验收 | ① KOReader 订阅 OPDS 并在线下载 EPUB（B2 遗留验收）；② 重打 Android APK（嵌入标签筛选/任务详情/指标卡新 UI）；③ 可选：PyInstaller exe 出 release | KOReader 内完成 EPUB 下载并打开；新 APK 安装可用 |
