@@ -115,8 +115,11 @@ def test_switch_source_endpoint_validation(client, monkeypatch):
         return FakeTask()
 
     from app.services import task_manager
+    from app.services import tool_registry
 
     monkeypatch.setattr(task_manager.manager, "create_task", fake_create_task)
+    # 端点在创建任务前会检查 lncrawl 可执行文件——CI/裸环境未安装，统一打桩
+    monkeypatch.setattr(tool_registry, "resolve_executable", lambda spec: "fake-exe")
 
     r = client.post("/api/novels/no-such-novel/switch-source",
                     json={"new_url": "https://mirror-x.example.com/book"})
